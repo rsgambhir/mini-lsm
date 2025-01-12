@@ -62,7 +62,7 @@ impl BlockIterator {
 
     /// Creates a block iterator and seek to the first entry.
     pub fn create_and_seek_to_first(block: Arc<Block>) -> Self {
-        if block.offsets.len() > 0 {
+        if !block.offsets.is_empty() {
             let (k, value_range) = block.get_kv_at_idx(0);
             let key = k.to_key_vec();
             let first_key = k.to_key_vec();

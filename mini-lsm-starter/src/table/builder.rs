@@ -60,8 +60,8 @@ impl SsTableBuilder {
             std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size)).build();
         self.meta.push(BlockMeta {
             offset: self.data.len(),
-            first_key: std::mem::replace(&mut self.first_key, KeyVec::default()).into_key_bytes(),
-            last_key: std::mem::replace(&mut self.last_key, KeyVec::default()).into_key_bytes(),
+            first_key: std::mem::take(&mut self.first_key).into_key_bytes(),
+            last_key: std::mem::take(&mut self.last_key).into_key_bytes(),
         });
         self.data.extend(block.encode());
     }
@@ -88,7 +88,7 @@ impl SsTableBuilder {
             panic!("SSTable too big")
         }
         BlockMeta::encode_block_meta(self.meta.as_slice(), &mut self.data);
-        (&mut self.data).put_u32_le(meta_off as u32);
+        self.data.put_u32_le(meta_off as u32);
 
         Ok(SsTable {
             file: FileObject::create(path.as_ref(), self.data)?,

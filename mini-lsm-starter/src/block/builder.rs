@@ -52,9 +52,9 @@ impl BlockBuilder {
         // note: overflow checked at the last add
         self.offsets.push(self.data.len() as u16);
 
-        self.data.extend_from_slice(&mut key_len.to_le_bytes());
+        self.data.extend_from_slice(&key_len.to_le_bytes());
         self.data.extend_from_slice(key.into_inner());
-        self.data.extend_from_slice(&mut val_len.to_le_bytes());
+        self.data.extend_from_slice(&val_len.to_le_bytes());
         self.data.extend_from_slice(value);
 
         if self.data.len() > u16::MAX as usize {
