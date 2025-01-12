@@ -11,5 +11,6 @@ pub mod mvcc;
 pub mod table;
 pub mod wal;
 
+mod rsg_random;
 #[cfg(test)]
 mod tests;

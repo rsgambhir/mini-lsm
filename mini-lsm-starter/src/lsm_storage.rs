@@ -15,6 +15,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
@@ -120,7 +121,7 @@ pub enum CompactionFilter {
 
 /// The storage interface of the LSM tree.
 pub(crate) struct LsmStorageInner {
-    pub(crate) state: Arc<RwLock<Arc<LsmStorageState>>>,
+    pub(crate) state: Arc<RwLock<LsmStorageState>>,
     pub(crate) state_lock: Mutex<()>,
     path: PathBuf,
     pub(crate) block_cache: Arc<BlockCache>,
@@ -253,7 +254,7 @@ impl LsmStorageInner {
         };
 
         let storage = Self {
-            state: Arc::new(RwLock::new(Arc::new(state))),
+            state: Arc::new(RwLock::new(state)),
             state_lock: Mutex::new(()),
             path: path.to_path_buf(),
             block_cache: Arc::new(BlockCache::new(1024)),
@@ -279,7 +280,11 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+        let state = self.state.read();
+        Ok(std::iter::once(&state.memtable)
+            .chain(state.imm_memtables.iter())
+            .find_map(|t| t.get(_key))
+            .filter(|v| !v.is_empty()))
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -287,14 +292,33 @@ impl LsmStorageInner {
         unimplemented!()
     }
 
+    fn try_freeze(&self, size_hint: usize) -> Result<()> {
+        if size_hint > self.options.target_sst_size {
+            let guard = self.state_lock.lock();
+            if self.state.read().memtable.approximate_size() > self.options.target_sst_size {
+                return self.force_freeze_memtable(&guard);
+            }
+        }
+        Ok(())
+    }
+
+    fn _put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
+        let state = self.state.read();
+        let res = state.memtable.put(_key, _value);
+        let sz = state.memtable.approximate_size();
+        drop(state);
+        self.try_freeze(sz).expect("failed to freeze");
+        res
+    }
+
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+        self._put(_key, _value)
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        unimplemented!()
+        self._put(_key, &[])
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -319,7 +343,13 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let mut state = self.state.write();
+        let old = std::mem::replace(
+            &mut state.memtable,
+            Arc::new(MemTable::create(self.next_sst_id())),
+        );
+        state.imm_memtables.insert(0, old.clone());
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
@@ -338,6 +368,13 @@ impl LsmStorageInner {
         _lower: Bound<&[u8]>,
         _upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let state = self.state.read();
+        LsmIterator::new(MergeIterator::create(
+            std::iter::once(&state.memtable)
+                .chain(state.imm_memtables.iter())
+                .map(|mt: &Arc<MemTable>| Box::new(mt.clone().scan(_lower, _upper)))
+                .collect(),
+        ))
+        .map(FusedIterator::new)
     }
 }
