@@ -1,11 +1,8 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 mod builder;
 mod iterator;
 
 pub use builder::BlockBuilder;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 pub use iterator::BlockIterator;
 
 /// A block is the smallest unit of read and caching in LSM tree. It is a collection of sorted key-value pairs.
@@ -18,11 +15,45 @@ impl Block {
     /// Encode the internal data to the data layout illustrated in the tutorial
     /// Note: You may want to recheck if any of the expected field is missing from your output
     pub fn encode(&self) -> Bytes {
-        unimplemented!()
+        let block_size = /* KV data */ self.data.len() +
+            /* offsets */ 2 * (self.offsets.len()) + /* num elements */2;
+
+        let mut block_bytes = Vec::new();
+
+        block_bytes.reserve_exact(block_size);
+        block_bytes.extend_from_slice(&self.data);
+
+        self.offsets
+            .iter()
+            .for_each(|o| block_bytes.extend_from_slice(&o.to_le_bytes()));
+
+        let num_elements = self.offsets.len() as u16;
+        block_bytes.extend_from_slice(&num_elements.to_le_bytes());
+
+        Bytes::from(block_bytes)
     }
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
     pub fn decode(data: &[u8]) -> Self {
-        unimplemented!()
+        if data.len() < 2 {
+            panic!("block decode: insufficient footer length")
+        }
+        let num_elements = (&data[data.len() - 2..]).get_u16_le() as usize;
+        if data.len() < 2 + 2 * num_elements {
+            panic!(
+                "block decode: insufficient input length, got: {}, required: {}",
+                data.len(),
+                2 + 2 * num_elements
+            )
+        }
+        let kv_data_sz = data.len() - 2 - 2 * num_elements;
+
+        let offsets = data[kv_data_sz..data.len() - 2]
+            .chunks(2)
+            .map(|mut o| o.get_u16_le())
+            .collect();
+
+        let data = data[0..kv_data_sz].to_vec();
+        Self { data, offsets }
     }
 }
