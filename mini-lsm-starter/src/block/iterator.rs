@@ -9,6 +9,7 @@ pub struct BlockIterator {
     /// The internal `Block`, wrapped by an `Arc`
     block: Arc<Block>,
     /// The first key in the block
+    #[allow(dead_code)]
     first_key: KeyVec,
     /// The current key, empty represents the iterator is invalid
     key: KeyVec,
@@ -22,6 +23,7 @@ type ValueRange = (usize, usize);
 
 impl Block {
     // todo(ramneek): change return type to KeyVec?
+    #[allow(dead_code)]
     fn get_key_at_idx(&self, i: usize) -> KeySlice {
         self.get_key_at_offset(self.offsets[i] as usize)
     }
@@ -48,7 +50,7 @@ impl Block {
 }
 
 impl BlockIterator {
-    fn new(block: Arc<Block>) -> Self {
+    pub fn new(block: Arc<Block>) -> Self {
         Self {
             block,
             first_key: KeyVec::new(),
@@ -118,7 +120,7 @@ impl BlockIterator {
         self.seek_to_idx(
             self.block
                 .offsets
-                .partition_point(|i| self.block.get_key_at_offset(*i as usize).cmp(&key).is_lt()),
+                .partition_point(|i| self.block.get_key_at_offset(*i as usize) < key),
         );
     }
 

@@ -77,7 +77,7 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     fn next(&mut self) -> Result<()> {
         let mut current = std::mem::replace(&mut self.current, None)
             .expect("next called on an invalid merge iterator");
-        let curr_key = current.1.key().clone();
+        let curr_key = current.1.key();
 
         while let Some(mut top) = self.iters.pop() {
             if top.1.key().ne(&curr_key) {

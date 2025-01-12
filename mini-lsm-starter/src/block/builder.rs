@@ -41,7 +41,7 @@ impl BlockBuilder {
         // todo(ramneek): should we move num elements to the front?
         let new_size = /* KV data */ self.data.len() + 2 + key.len() + 2 + value.len() +
             /* offsets */ 2 * (self.offsets.len() + 1) + /* num elements */2;
-        if self.offsets.len() != 0 && new_size > self.target_block_size {
+        if !self.offsets.is_empty() && new_size > self.target_block_size {
             return false;
         }
 
