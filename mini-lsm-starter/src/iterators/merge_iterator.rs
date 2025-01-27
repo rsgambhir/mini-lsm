@@ -1,4 +1,5 @@
 use std::cmp::{self};
+use std::collections::binary_heap::PeekMut;
 use std::collections::BinaryHeap;
 
 use crate::key::KeySlice;
@@ -35,7 +36,7 @@ impl<I: StorageIterator> Ord for HeapWrapper<I> {
 /// Merge multiple iterators of the same type. If the same key occurs multiple times in some
 /// iterators, prefer the one with smaller index.
 pub struct MergeIterator<I: StorageIterator> {
-    // invariant: iters and current are all valid
+    // invariant: iters and current are all is_valid
     iters: BinaryHeap<HeapWrapper<I>>,
     current: Option<HeapWrapper<I>>,
 }
@@ -79,11 +80,14 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
             std::mem::take(&mut self.current).expect("next called on an invalid merge iterator");
         let curr_key = current.1.key();
 
-        while let Some(mut top) = self.iters.pop() {
-            if top.1.key().ne(&curr_key) {
-                self.iters.push(top);
+        loop {
+            let Some(top_peek) = self.iters.peek_mut() else {
+                break;
+            };
+            if top_peek.1.key().ne(&curr_key) {
                 break;
             }
+            let mut top = PeekMut::pop(top_peek);
             top.1.next()?;
             if top.1.is_valid() {
                 self.iters.push(top);
@@ -97,5 +101,9 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
 
         self.current = self.iters.pop();
         Ok(())
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.iters.len() + 1
     }
 }

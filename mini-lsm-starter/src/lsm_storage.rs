@@ -6,21 +6,23 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::Result;
-use bytes::Bytes;
-use parking_lot::{Mutex, MutexGuard, RwLock};
-
 use crate::block::Block;
 use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
 use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::iterators::StorageIterator;
+use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
+use anyhow::Result;
+use bytes::Bytes;
+use parking_lot::{Mutex, MutexGuard, RwLock};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -121,7 +123,10 @@ pub enum CompactionFilter {
 
 /// The storage interface of the LSM tree.
 pub(crate) struct LsmStorageInner {
-    pub(crate) state: Arc<RwLock<LsmStorageState>>,
+    // Making this an Arc<LsmStorageState> protected by a Rwlock avoids cloning the LsmStorageState in the read paths(scan, get, put).
+    // The writers(compaction, freezing, etc.) will clone the LsmStorageState and update the Arc, which is protected by RwLock.
+    // Arc<LsmStorageState> serves as a snapshot of the lsm-state and writers update the snapshot as a whole.
+    pub(crate) state: Arc<RwLock<Arc<LsmStorageState>>>,
     pub(crate) state_lock: Mutex<()>,
     path: PathBuf,
     pub(crate) block_cache: Arc<BlockCache>,
@@ -155,7 +160,8 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        todo!()
+        // self.flush_thread.
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -238,6 +244,9 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
+        if !path.exists() {
+            std::fs::create_dir_all(path)?;
+        }
         let state = LsmStorageState::create(&options);
 
         let compaction_controller = match &options.compaction_options {
@@ -254,7 +263,7 @@ impl LsmStorageInner {
         };
 
         let storage = Self {
-            state: Arc::new(RwLock::new(state)),
+            state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
             path: path.to_path_buf(),
             block_cache: Arc::new(BlockCache::new(1024)),
@@ -280,11 +289,34 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        let state = self.state.read();
-        Ok(std::iter::once(&state.memtable)
+        let state = { self.state.read().clone() };
+
+        match std::iter::once(&state.memtable)
             .chain(state.imm_memtables.iter())
             .find_map(|t| t.get(_key))
-            .filter(|v| !v.is_empty()))
+        {
+            Some(v) if !v.is_empty() => return Ok(Some(v)),
+            Some(v) if v.is_empty() => return Ok(None),
+            _ => {}
+        }
+
+        for sst in state
+            .l0_sstables
+            .iter()
+            .map(|id| state.sstables.get(id).unwrap().clone())
+            .filter(|sst| sst.first_key().raw_ref() <= _key && _key <= sst.last_key().raw_ref())
+        {
+            let itr = SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(_key))?;
+            if itr.is_valid() && itr.key().raw_ref() == _key {
+                let val = itr.value();
+                return if val.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(Bytes::copy_from_slice(val)))
+                };
+            }
+        }
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -295,7 +327,9 @@ impl LsmStorageInner {
     fn try_freeze(&self, size_hint: usize) -> Result<()> {
         if size_hint > self.options.target_sst_size {
             let guard = self.state_lock.lock();
-            if self.state.read().memtable.approximate_size() > self.options.target_sst_size {
+            let state = self.state.read();
+            if state.memtable.approximate_size() > self.options.target_sst_size {
+                drop(state);
                 return self.force_freeze_memtable(&guard);
             }
         }
@@ -343,18 +377,37 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        let mut state = self.state.write();
-        let old = std::mem::replace(
-            &mut state.memtable,
-            Arc::new(MemTable::create(self.next_sst_id())),
-        );
-        state.imm_memtables.insert(0, old.clone());
+        let next = Arc::new(MemTable::create(self.next_sst_id()));
+        let mut sp = self.state.write();
+        let mut new_state = sp.as_ref().clone();
+        new_state.imm_memtables.insert(0, sp.memtable.clone());
+        new_state.memtable = next;
+        *sp = Arc::new(new_state);
         Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let _state_lock = self.state_lock.lock();
+
+        let last_memtable = { self.state.read().imm_memtables.last().unwrap().clone() };
+
+        let mut builder = SsTableBuilder::new(self.options.block_size);
+        last_memtable.flush(&mut builder)?;
+        let sst = builder.build(
+            last_memtable.id(),
+            Some(self.block_cache.clone()),
+            self.path_of_sst(last_memtable.id()),
+        )?;
+
+        let mut sp = self.state.write();
+        let mut new_state = sp.as_ref().clone();
+        new_state.imm_memtables.pop();
+        new_state.l0_sstables.insert(0, sst.sst_id());
+        new_state.sstables.insert(sst.sst_id(), Arc::new(sst));
+
+        *sp = Arc::new(new_state);
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -368,13 +421,68 @@ impl LsmStorageInner {
         _lower: Bound<&[u8]>,
         _upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        let state = self.state.read();
-        LsmIterator::new(MergeIterator::create(
+        let state = { self.state.read().clone() };
+
+        let mem_tables_itr = MergeIterator::create(
             std::iter::once(&state.memtable)
                 .chain(state.imm_memtables.iter())
                 .map(|mt: &Arc<MemTable>| Box::new(mt.clone().scan(_lower, _upper)))
                 .collect(),
-        ))
-        .map(FusedIterator::new)
+        );
+
+        let mut overlapping_ssts_itr = vec![];
+        for sst in state
+            .l0_sstables
+            .iter()
+            .map(|id| state.sstables.get(id).unwrap().clone())
+            .filter(|sst| sst_overlaps_range(sst, _lower, _upper))
+        {
+            let itr = sst_seek_to_start(sst.clone(), _lower)?;
+            overlapping_ssts_itr.push(Box::new(itr));
+        }
+
+        let merge_itr =
+            TwoMergeIterator::create(mem_tables_itr, MergeIterator::create(overlapping_ssts_itr))?;
+        LsmIterator::new(merge_itr, _upper).map(FusedIterator::new)
+    }
+}
+
+enum SeekPos<'a> {
+    Start,
+    Key(KeySlice<'a>, bool),
+    None,
+}
+fn sst_overlaps_range(sst: &Arc<SsTable>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
+    // intersection with Lower Bound -> inf
+    match lower {
+        Bound::Included(skey) if skey > sst.last_key().raw_ref() => return false,
+        Bound::Excluded(skey) if skey >= sst.last_key().raw_ref() => return false,
+        _ => {}
+    }
+
+    // intersection with -inf -> upper bound
+    match upper {
+        Bound::Included(ekey) if ekey < sst.first_key().raw_ref() => return false,
+        Bound::Excluded(ekey) if ekey <= sst.first_key().raw_ref() => return false,
+        _ => {}
+    }
+
+    true
+}
+
+fn sst_seek_to_start(sst: Arc<SsTable>, start: Bound<&[u8]>) -> Result<SsTableIterator> {
+    match start {
+        Bound::Unbounded => SsTableIterator::create_and_seek_to_first(sst),
+        Bound::Included(skey) if skey == sst.first_key().raw_ref() => {
+            SsTableIterator::create_and_seek_to_first(sst)
+        }
+        Bound::Included(skey) => {
+            SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(skey))
+        }
+        Bound::Excluded(skey) => {
+            let mut itr = SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(skey))?;
+            itr.next()?;
+            Ok(itr)
+        }
     }
 }
