@@ -300,11 +300,14 @@ impl LsmStorageInner {
             _ => {}
         }
 
+        let key_fp = farmhash::fingerprint32(_key);
+
         for sst in state
             .l0_sstables
             .iter()
             .map(|id| state.sstables.get(id).unwrap().clone())
             .filter(|sst| sst.first_key().raw_ref() <= _key && _key <= sst.last_key().raw_ref())
+            .filter(|sst| sst.bloom.as_ref().is_none_or(|b| b.may_contain(key_fp)))
         {
             let itr = SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(_key))?;
             if itr.is_valid() && itr.key().raw_ref() == _key {

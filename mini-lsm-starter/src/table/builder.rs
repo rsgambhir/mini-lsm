@@ -1,14 +1,14 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::path::Path;
 use std::sync::Arc;
 
 use super::{BlockMeta, FileObject, SsTable};
 use crate::key::KeyVec;
+use crate::table::bloom::Bloom;
 use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
 use anyhow::Result;
 use bytes::BufMut;
+
+const BLOOM_FILTER_FPR: f64 = 0.01;
 
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
@@ -18,6 +18,7 @@ pub struct SsTableBuilder {
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
+    key_fingerprints: Vec<u32>,
 }
 
 impl SsTableBuilder {
@@ -30,6 +31,7 @@ impl SsTableBuilder {
             data: vec![],
             meta: vec![],
             block_size,
+            key_fingerprints: vec![],
         }
     }
 
@@ -50,6 +52,8 @@ impl SsTableBuilder {
             self.first_key = key.to_key_vec();
         }
         self.last_key = key.to_key_vec();
+        self.key_fingerprints
+            .push(farmhash::fingerprint32(key.raw_ref()));
     }
 
     fn split_new_block(&mut self) {
@@ -83,12 +87,27 @@ impl SsTableBuilder {
     ) -> Result<SsTable> {
         self.split_new_block();
 
+        if self.meta.is_empty() {
+            panic!("building empty sstable")
+        }
+
         let meta_off = self.data.len();
         if meta_off > u32::MAX as usize {
             panic!("SSTable too big")
         }
         BlockMeta::encode_block_meta(self.meta.as_slice(), &mut self.data);
         self.data.put_u32_le(meta_off as u32);
+
+        let bf = Bloom::build_from_key_hashes(
+            self.key_fingerprints.as_slice(),
+            Bloom::bloom_bits_per_key(self.key_fingerprints.len(), BLOOM_FILTER_FPR),
+        );
+        let bf_offset = self.data.len();
+        if meta_off > u32::MAX as usize {
+            panic!("SSTable too big")
+        }
+        bf.encode(&mut self.data);
+        self.data.put_u32_le(bf_offset as u32);
 
         Ok(SsTable {
             file: FileObject::create(path.as_ref(), self.data)?,
@@ -98,7 +117,7 @@ impl SsTableBuilder {
             first_key: self.meta.first().unwrap().first_key.clone(),
             last_key: self.meta.last().unwrap().last_key.clone(),
             block_meta: self.meta,
-            bloom: None,
+            bloom: Some(bf),
             max_ts: 0,
         })
     }

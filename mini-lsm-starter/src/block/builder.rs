@@ -1,6 +1,3 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use crate::key::{KeySlice, KeyVec};
 
 use super::Block;
@@ -44,16 +41,25 @@ impl BlockBuilder {
         if !self.offsets.is_empty() && new_size > self.target_block_size {
             return false;
         }
-
         // note: overflow checks at the start
-        let key_len = key.len() as u16;
+        let overlap = key
+            .raw_ref()
+            .iter()
+            .zip(self.first_key.raw_ref().iter())
+            .take_while(|(x, y)| x == y)
+            .count() as u16;
+
+        let key_len = key.len() as u16 - overlap;
         let val_len = value.len() as u16;
 
         // note: overflow checked at the last add
         self.offsets.push(self.data.len() as u16);
 
+        self.data.extend_from_slice(&overlap.to_le_bytes());
         self.data.extend_from_slice(&key_len.to_le_bytes());
-        self.data.extend_from_slice(key.into_inner());
+        self.data
+            .extend_from_slice(&key.into_inner()[overlap as usize..]);
+
         self.data.extend_from_slice(&val_len.to_le_bytes());
         self.data.extend_from_slice(value);
 
@@ -61,6 +67,9 @@ impl BlockBuilder {
             panic!("block data length too large")
         }
 
+        if self.first_key.is_empty() {
+            self.first_key = key.to_key_vec();
+        }
         true
     }
 
