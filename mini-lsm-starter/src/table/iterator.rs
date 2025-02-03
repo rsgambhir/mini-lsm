@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
+use super::SsTable;
+use crate::block::Block;
+use crate::{block::BlockIterator, iterators::StorageIterator, key::KeySlice};
 use anyhow::Result;
 
-use super::SsTable;
-use crate::{block::BlockIterator, iterators::StorageIterator, key::KeySlice};
-
 /// An iterator over the contents of an SSTable.
-pub struct SsTableIterator {
+pub struct SsTableIterator<const BYPASS_CACHE: bool = false> {
     table: Arc<SsTable>,
     blk_iter: BlockIterator,
     blk_idx: usize,
 }
 
-impl SsTableIterator {
+impl<const BYPASS_CACHE: bool> SsTableIterator<BYPASS_CACHE> {
     /// Create a new iterator and seek to the first key-value pair in the first data block.
     pub fn create_and_seek_to_first(table: Arc<SsTable>) -> Result<Self> {
         let (blk_idx, blk_iter) = Self::_seek_to_key(table.as_ref(), KeySlice::default())?;
@@ -31,17 +31,26 @@ impl SsTableIterator {
         Ok(())
     }
 
+    fn _read_block(table: &SsTable, block_idx: usize) -> Result<Arc<Block>> {
+        // todo: use MMAPed io to bypass OS cache.
+        if BYPASS_CACHE {
+            table.read_block(block_idx)
+        } else {
+            table.read_block_cached(block_idx)
+        }
+    }
+
     fn _seek_to_key(table: &SsTable, key: KeySlice) -> Result<(usize, BlockIterator)> {
         if key.is_empty() {
             Ok((
                 0,
-                BlockIterator::create_and_seek_to_first(table.read_block_cached(0)?),
+                BlockIterator::create_and_seek_to_first(Self::_read_block(table, 0)?),
             ))
         } else {
             let idx = table.find_block_idx(key);
             Ok((
                 idx,
-                BlockIterator::create_and_seek_to_key(table.read_block_cached(idx)?, key),
+                BlockIterator::create_and_seek_to_key(Self::_read_block(table, idx)?, key),
             ))
         }
     }
@@ -56,6 +65,13 @@ impl SsTableIterator {
         })
     }
 
+    pub fn create_and_seek_to_partition_point<P>(table: Arc<SsTable>, pred: P) -> Self
+    where
+        P: FnMut(KeySlice) -> bool,
+    {
+        todo!("(ramneek) implement partition point API");
+    }
+
     /// Seek to the first key-value pair which >= `key`.
     /// Note: You probably want to review the handout for detailed explanation when implementing
     /// this function.
@@ -65,9 +81,16 @@ impl SsTableIterator {
         self.blk_iter = blk_iter;
         Ok(())
     }
+
+    pub fn seek_to_partition_point<P>(&mut self, pred: P)
+    where
+        P: FnMut(KeySlice) -> bool,
+    {
+        todo!("(ramneek) implement partition point API");
+    }
 }
 
-impl StorageIterator for SsTableIterator {
+impl<const BYPASS_CACHE: bool> StorageIterator for SsTableIterator<BYPASS_CACHE> {
     type KeyType<'a> = KeySlice<'a>;
 
     /// Return the `value` that's held by the underlying block iterator.
@@ -94,9 +117,10 @@ impl StorageIterator for SsTableIterator {
             if self.blk_idx == self.table.num_of_blocks() {
                 break;
             }
-            self.blk_iter = BlockIterator::create_and_seek_to_first(
-                self.table.read_block_cached(self.blk_idx)?,
-            );
+            self.blk_iter = BlockIterator::create_and_seek_to_first(Self::_read_block(
+                &self.table,
+                self.blk_idx,
+            )?);
         }
 
         Ok(())

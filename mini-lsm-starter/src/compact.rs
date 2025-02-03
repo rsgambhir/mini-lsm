@@ -4,9 +4,16 @@ mod leveled;
 mod simple_leveled;
 mod tiered;
 
+use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::iterators::concat_iterator::SstConcatIterator;
+use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::iterators::StorageIterator;
+use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::Result;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
 use serde::{Deserialize, Serialize};
@@ -14,9 +21,6 @@ pub use simple_leveled::{
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, SimpleLeveledCompactionTask,
 };
 pub use tiered::{TieredCompactionController, TieredCompactionOptions, TieredCompactionTask};
-
-use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
-use crate::table::SsTable;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CompactionTask {
@@ -109,11 +113,106 @@ pub enum CompactionOptions {
 
 impl LsmStorageInner {
     fn compact(&self, _task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
-        unimplemented!()
+        match _task {
+            CompactionTask::ForceFullCompaction {
+                l0_sstables: l0,
+                l1_sstables: l1,
+            } => {
+                let state = { self.state.read().clone() };
+
+                let mut l0_itrs: Vec<Box<SsTableIterator<true>>> = Vec::new();
+                for sst in l0.iter().map(|id| state.sstables.get(id).unwrap()) {
+                    l0_itrs.push(Box::new(SsTableIterator::<true>::create_and_seek_to_first(
+                        sst.clone(),
+                    )?));
+                }
+                let l0_itr = MergeIterator::create(l0_itrs);
+
+                let l1_itr = SstConcatIterator::create_and_seek_to_first(
+                    l1.iter()
+                        .map(|id| state.sstables.get(id).unwrap().clone())
+                        .collect(),
+                )?;
+
+                let mut itr = TwoMergeIterator::create(l0_itr, l1_itr)?;
+
+                let mut new_l1_ssts: Vec<Arc<SsTable>> = Vec::new();
+
+                let mut builder = SsTableBuilder::new(self.options.block_size);
+                // todo(ramneek): remove dangling ssts here, or in a background thread.
+                while itr.is_valid() {
+                    let key = itr.key();
+                    let val = itr.value();
+                    if !val.is_empty() {
+                        builder.add(key, val);
+                    }
+                    itr.next()?;
+                    if (!itr.is_valid() && !builder.is_empty()) || // reached end
+                        builder.estimated_size() > self.options.target_sst_size
+                    {
+                        let b = std::mem::replace(
+                            &mut builder,
+                            SsTableBuilder::new(self.options.block_size),
+                        );
+                        let id = self.next_sst_id();
+                        let new_sst =
+                            b.build(id, Some(self.block_cache.clone()), self.path_of_sst(id))?;
+                        new_l1_ssts.push(Arc::new(new_sst));
+                    }
+                }
+
+                Ok(new_l1_ssts)
+            }
+            _ => panic!("not supported"),
+        }
     }
 
     pub fn force_full_compaction(&self) -> Result<()> {
-        unimplemented!()
+        let old_state = { self.state.read().clone() };
+
+        let old_l0_ssts = old_state.l0_sstables.clone();
+        let old_l1_ssts = old_state.levels[0].1.clone();
+        let task = CompactionTask::ForceFullCompaction {
+            l0_sstables: old_l0_ssts.clone(),
+            l1_sstables: old_l1_ssts.clone(),
+        };
+        let new_ssts = self.compact(&task)?;
+
+        *self.state.write() = {
+            let _lock = self.state_lock.lock();
+            let mut new_state = { self.state.read().as_ref().clone() };
+
+            new_ssts
+                .iter()
+                .for_each(|x| _ = new_state.sstables.insert(x.sst_id(), x.clone()));
+
+            new_state.levels[0].1 = new_ssts.iter().map(|x| x.sst_id()).collect();
+
+            new_state.l0_sstables = new_state
+                .l0_sstables
+                .iter()
+                .take_while(|id| **id != old_l0_ssts[0])
+                .cloned()
+                .collect();
+
+            old_l0_ssts
+                .iter()
+                .chain(old_l1_ssts.iter())
+                .for_each(|x| _ = new_state.sstables.remove(x));
+
+            Arc::new(new_state)
+        };
+
+        // clean up old files
+        // note that SSTable has an open file handle to the sst file,
+        // any old readers that still have a reference to the SST will prevent the OS from actually
+        // deleting the file, if this facility is not available us, then we need to implement this functionality
+        // in the deref trait of the SSTable or let the sstables be cleaned by a background thread.
+        for id in old_l0_ssts.iter().chain(old_l1_ssts.iter()) {
+            fs::remove_file(self.path_of_sst(*id))?
+        }
+
+        Ok(())
     }
 
     fn trigger_compaction(&self) -> Result<()> {

@@ -119,7 +119,7 @@ impl BlockIterator {
     }
 
     /// Seek to the first key that is >= `key`.
-    pub fn  seek_to_key(&mut self, key: KeySlice) {
+    pub fn seek_to_key(&mut self, key: KeySlice) {
         let mut low = 0;
         let mut high = self.block.offsets.len();
         while low < high {

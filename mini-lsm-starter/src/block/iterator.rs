@@ -101,6 +101,13 @@ impl BlockIterator {
         itr
     }
 
+    pub fn create_and_seek_to_partition_point<P>(_block: Arc<Block>, mut _pred: P) -> Self
+    where
+        P: FnMut(KeySlice) -> bool,
+    {
+        todo!("(ramneek) implement partition point API");
+    }
+
     /// Returns the key of the current entry.
     pub fn key(&self) -> KeySlice {
         self.key.as_key_slice()
@@ -138,6 +145,13 @@ impl BlockIterator {
                 .offsets
                 .partition_point(|i| self.compare_offset_with_key(*i, key).is_lt()),
         );
+    }
+
+    pub fn seek_to_partition_point<P>(&mut self, _pred: P)
+    where
+        P: FnMut(KeySlice) -> bool,
+    {
+        todo!("(ramneek) implement partition point API");
     }
 
     fn seek_to_idx(&mut self, idx: usize) {
