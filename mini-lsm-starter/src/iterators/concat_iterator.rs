@@ -30,7 +30,7 @@ impl SstConcatIterator {
 
         Ok(Self {
             current,
-            next_sst_idx: sstables.len(),
+            next_sst_idx: 1,
             sstables,
         })
     }

@@ -12,8 +12,8 @@ use std::ops::Bound;
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
 type LsmIteratorInner = TwoMergeIterator<
-    MergeIterator<MemTableIterator>,
-    TwoMergeIterator<MergeIterator<SsTableIterator>, SstConcatIterator>,
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>,
+    MergeIterator<SstConcatIterator>,
 >;
 
 pub struct LsmIterator {

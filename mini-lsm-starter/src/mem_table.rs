@@ -1,5 +1,3 @@
-#![allow(dead_code)] // (todo) REMOVE THIS LINE after fully implementing this functionality
-
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
 use crate::table::SsTableBuilder;
@@ -9,7 +7,6 @@ use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use nom::AsBytes;
 use ouroboros::self_referencing;
-use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
@@ -22,7 +19,6 @@ use std::sync::Arc;
 /// chapters of week 1 and week 2.
 pub struct MemTable {
     map: Arc<SkipMap<Bytes, Bytes>>,
-    btree_map: Arc<BTreeMap<Bytes, Bytes>>,
     wal: Option<Wal>,
     id: usize,
     approximate_size: Arc<AtomicUsize>,
@@ -39,12 +35,11 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
 
 impl MemTable {
     /// Create a new mem-table.
-    pub fn create(_id: usize) -> Self {
+    pub fn create(id: usize) -> Self {
         MemTable {
             map: Arc::new(Default::default()),
-            btree_map: Arc::new(Default::default()),
             wal: None,
-            id: _id,
+            id,
             approximate_size: Arc::new(Default::default()),
         }
     }
