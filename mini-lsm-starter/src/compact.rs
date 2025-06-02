@@ -4,6 +4,7 @@ mod leveled;
 mod simple_leveled;
 mod tiered;
 
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,14 +114,14 @@ pub enum CompactionOptions {
 }
 
 impl LsmStorageInner {
-    fn get_level_itr(
-        state: &Arc<LsmStorageState>,
+    fn get_concat_itr(
+        ssts: &HashMap<usize, Arc<SsTable>>,
         level_sst_ids: &[usize],
     ) -> Result<SstConcatIterator> {
         SstConcatIterator::create_and_seek_to_first(
             level_sst_ids
                 .iter()
-                .map(|id| state.sstables.get(id).unwrap().clone())
+                .map(|id| ssts.get(id).unwrap().clone())
                 .collect(),
         )
     }
@@ -138,7 +139,7 @@ impl LsmStorageInner {
         Ok(MergeIterator::create(l0_itrs))
     }
 
-    fn build_level<Itr: for<'a> StorageIterator<KeyType<'a> = Key<&'a [u8]>>>(
+    fn build_sorted_run<Itr: for<'a> StorageIterator<KeyType<'a> = Key<&'a [u8]>>>(
         &self,
         mut itr: Itr,
     ) -> Result<Vec<Arc<SsTable>>> {
@@ -178,27 +179,42 @@ impl LsmStorageInner {
                 let state = { self.state.read().clone() };
 
                 let l0_itr = Self::get_l0_itr(&state, l0)?;
-                let l1_itr = Self::get_level_itr(&state, l1)?;
+                let l1_itr = Self::get_concat_itr(&state.sstables, l1)?;
 
                 let itr = TwoMergeIterator::create(l0_itr, l1_itr)?;
-                self.build_level(itr)
+                self.build_sorted_run(itr)
             }
 
             CompactionTask::Simple(task) => {
                 let state = { self.state.read().clone() };
 
-                let lower_itr = Self::get_level_itr(&state, &task.lower_level_sst_ids)?;
+                let lower_itr = Self::get_concat_itr(&state.sstables, &task.lower_level_sst_ids)?;
                 if task.upper_level.is_some() {
                     // concat iterator
-                    let upper_itr = Self::get_level_itr(&state, &task.upper_level_sst_ids)?;
+                    let upper_itr =
+                        Self::get_concat_itr(&state.sstables, &task.upper_level_sst_ids)?;
                     let itr = TwoMergeIterator::create(upper_itr, lower_itr)?;
-                    self.build_level(itr)
+                    self.build_sorted_run(itr)
                 } else {
                     // merge iterator
                     let upper_itr = Self::get_l0_itr(&state, &task.upper_level_sst_ids)?;
                     let itr = TwoMergeIterator::create(upper_itr, lower_itr)?;
-                    self.build_level(itr)
+                    self.build_sorted_run(itr)
                 }
+            }
+
+            CompactionTask::Tiered(task) => {
+                let state = { self.state.read().clone() };
+
+                let mut tiers_itrs = Vec::with_capacity(task.tiers.len());
+                for (_, tier_sst_ids) in &task.tiers {
+                    tiers_itrs.push(Box::new(Self::get_concat_itr(
+                        &state.sstables,
+                        tier_sst_ids,
+                    )?));
+                }
+                let itr = MergeIterator::create(tiers_itrs);
+                self.build_sorted_run(itr)
             }
             _ => panic!("not supported"),
         }
@@ -264,13 +280,16 @@ impl LsmStorageInner {
     fn trigger_compaction(&self) -> Result<()> {
         let state = { self.state.read().clone() };
         let task = self.compaction_controller.generate_compaction_task(&state);
+
         if task.is_none() {
             return Ok(());
         }
+        let task = task.unwrap();
+
         println!("running compaction task: {:?}", task);
         println!("state before compaction...");
         self.dump_structure();
-        let task = task.unwrap();
+
         let compacted_ssts = self.compact(&task)?;
 
         let _state_lock = self.state_lock.lock();
