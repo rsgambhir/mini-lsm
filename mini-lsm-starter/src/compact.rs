@@ -185,19 +185,29 @@ impl LsmStorageInner {
                 self.build_sorted_run(itr)
             }
 
-            CompactionTask::Simple(task) => {
+            CompactionTask::Simple(SimpleLeveledCompactionTask {
+                upper_level,
+                upper_level_sst_ids,
+                lower_level_sst_ids,
+                ..
+            })
+            | CompactionTask::Leveled(LeveledCompactionTask {
+                upper_level,
+                upper_level_sst_ids,
+                lower_level_sst_ids,
+                ..
+            }) => {
                 let state = { self.state.read().clone() };
 
-                let lower_itr = Self::get_concat_itr(&state.sstables, &task.lower_level_sst_ids)?;
-                if task.upper_level.is_some() {
+                let lower_itr = Self::get_concat_itr(&state.sstables, lower_level_sst_ids)?;
+                if upper_level.is_some() {
                     // concat iterator
-                    let upper_itr =
-                        Self::get_concat_itr(&state.sstables, &task.upper_level_sst_ids)?;
+                    let upper_itr = Self::get_concat_itr(&state.sstables, upper_level_sst_ids)?;
                     let itr = TwoMergeIterator::create(upper_itr, lower_itr)?;
                     self.build_sorted_run(itr)
                 } else {
                     // merge iterator
-                    let upper_itr = Self::get_l0_itr(&state, &task.upper_level_sst_ids)?;
+                    let upper_itr = Self::get_l0_itr(&state, upper_level_sst_ids)?;
                     let itr = TwoMergeIterator::create(upper_itr, lower_itr)?;
                     self.build_sorted_run(itr)
                 }
@@ -216,7 +226,6 @@ impl LsmStorageInner {
                 let itr = MergeIterator::create(tiers_itrs);
                 self.build_sorted_run(itr)
             }
-            _ => panic!("not supported"),
         }
     }
 
@@ -293,10 +302,14 @@ impl LsmStorageInner {
         let compacted_ssts = self.compact(&task)?;
 
         let _state_lock = self.state_lock.lock();
-        let state = { self.state.read().clone() };
+        let mut state = { self.state.read().clone() }.as_ref().clone();
+
+        compacted_ssts
+            .iter()
+            .for_each(|sst| _ = state.sstables.insert(sst.sst_id(), sst.clone()));
 
         let (mut state, ssts_to_del) = self.compaction_controller.apply_compaction_result(
-            state.as_ref(),
+            &state,
             &task,
             &compacted_ssts
                 .iter()
@@ -304,10 +317,6 @@ impl LsmStorageInner {
                 .collect::<Vec<usize>>(),
             false,
         );
-
-        compacted_ssts
-            .iter()
-            .for_each(|sst| _ = state.sstables.insert(sst.sst_id(), sst.clone()));
 
         ssts_to_del
             .iter()

@@ -15,8 +15,8 @@ pub struct SimpleLeveledCompactionTask {
     // if upper_level is `None`, then it is L0 compaction
     pub upper_level: Option<usize>,
     pub upper_level_sst_ids: Vec<usize>,
-    pub lower_level: usize,
     pub lower_level_sst_ids: Vec<usize>,
+    pub lower_level: usize,
     pub is_lower_level_bottom_level: bool,
 }
 
