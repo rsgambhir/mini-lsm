@@ -1,5 +1,3 @@
-#![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
-
 mod leveled;
 mod simple_leveled;
 mod tiered;
@@ -15,6 +13,7 @@ use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::Key;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::Result;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
@@ -252,8 +251,8 @@ impl LsmStorageInner {
         let new_ssts = self.compact(&task)?;
 
         {
+            let state_lock = self.state_lock.lock();
             *self.state.write() = {
-                let _lock = self.state_lock.lock();
                 let mut new_state = { self.state.read().as_ref().clone() };
 
                 new_ssts
@@ -274,6 +273,12 @@ impl LsmStorageInner {
                     .chain(old_l1_ssts.iter())
                     .for_each(|x| _ = new_state.sstables.remove(x));
 
+                if let Some(manifest) = &self.manifest {
+                    manifest.add_record(
+                        &state_lock,
+                        ManifestRecord::Compaction(task, new_state.levels[0].1.clone()),
+                    )?
+                }
                 Arc::new(new_state)
             };
         }
@@ -301,22 +306,31 @@ impl LsmStorageInner {
 
         let compacted_ssts = self.compact(&task)?;
 
-        let _state_lock = self.state_lock.lock();
+        let state_lock = self.state_lock.lock();
         let mut state = { self.state.read().clone() }.as_ref().clone();
 
         compacted_ssts
             .iter()
             .for_each(|sst| _ = state.sstables.insert(sst.sst_id(), sst.clone()));
 
+        let compaction_output = compacted_ssts
+            .iter()
+            .map(|sst| sst.sst_id())
+            .collect::<Vec<usize>>();
+
         let (mut state, ssts_to_del) = self.compaction_controller.apply_compaction_result(
             &state,
             &task,
-            &compacted_ssts
-                .iter()
-                .map(|sst| sst.sst_id())
-                .collect::<Vec<usize>>(),
+            &compaction_output,
             false,
         );
+
+        if let Some(manifest) = &self.manifest {
+            manifest.add_record(
+                &state_lock,
+                ManifestRecord::Compaction(task, compaction_output),
+            )?
+        }
 
         ssts_to_del
             .iter()
@@ -326,7 +340,7 @@ impl LsmStorageInner {
             *self.state.write() = Arc::new(state);
         }
 
-        drop(_state_lock);
+        drop(state_lock);
 
         println!("state after compaction...");
         self.dump_structure();

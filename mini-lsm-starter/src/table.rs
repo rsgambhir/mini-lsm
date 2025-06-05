@@ -91,6 +91,9 @@ impl FileObject {
     pub fn create(path: &Path, data: Vec<u8>) -> Result<Self> {
         std::fs::write(path, &data)?;
         File::open(path)?.sync_all()?;
+        if let Some(parent) = path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
         Ok(FileObject(
             Some(File::options().read(true).write(false).open(path)?),
             data.len() as u64,
