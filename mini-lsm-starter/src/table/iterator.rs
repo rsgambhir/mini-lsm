@@ -65,7 +65,7 @@ impl<const BYPASS_CACHE: bool> SsTableIterator<BYPASS_CACHE> {
         })
     }
 
-    pub fn create_and_seek_to_partition_point<P>(table: Arc<SsTable>, pred: P) -> Self
+    pub fn create_and_seek_to_partition_point<P>(_table: Arc<SsTable>, _pred: P) -> Self
     where
         P: FnMut(KeySlice) -> bool,
     {
@@ -82,7 +82,7 @@ impl<const BYPASS_CACHE: bool> SsTableIterator<BYPASS_CACHE> {
         Ok(())
     }
 
-    pub fn seek_to_partition_point<P>(&mut self, pred: P)
+    pub fn seek_to_partition_point<P>(&mut self, _pred: P)
     where
         P: FnMut(KeySlice) -> bool,
     {

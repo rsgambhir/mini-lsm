@@ -13,6 +13,5 @@ pub mod wal;
 
 mod util;
 
-mod rsg_random;
 #[cfg(test)]
 mod tests;
