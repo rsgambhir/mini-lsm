@@ -2,7 +2,7 @@ use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
 use crate::table::SsTableBuilder;
 use crate::wal::Wal;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use nom::AsBytes;
@@ -45,13 +45,26 @@ impl MemTable {
     }
 
     /// Create a new mem-table with WAL
-    pub fn create_with_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create_with_wal(id: usize, path: impl AsRef<Path>) -> Result<Self> {
+        Ok(MemTable {
+            map: Arc::new(Default::default()),
+            wal: Some(Wal::create(path)?),
+            id,
+            approximate_size: Arc::new(Default::default()),
+        })
     }
 
     /// Create a memtable from WAL
-    pub fn recover_from_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn recover_from_wal(id: usize, path: impl AsRef<Path>) -> Result<Self> {
+        let map = SkipMap::default();
+        let wal = Wal::recover(path, &map)?;
+
+        Ok(MemTable {
+            map: Arc::new(map),
+            wal: Some(wal),
+            id,
+            approximate_size: Arc::new(Default::default()),
+        })
     }
 
     pub fn for_testing_put_slice(&self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -71,8 +84,8 @@ impl MemTable {
     }
 
     /// Get a value by key.
-    pub fn get(&self, _key: &[u8]) -> Option<Bytes> {
-        self.map.get(_key).map(|v| v.value().clone())
+    pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.map.get(key).map(|v| v.value().clone())
     }
 
     /// Put a key-value pair into the mem-table.
@@ -80,14 +93,24 @@ impl MemTable {
     /// In week 1, day 1, simply put the key-value pair into the skipmap.
     /// In week 2, day 6, also flush the data to WAL.
     /// In week 3, day 5, modify the function to use the batch API.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        if _key.is_empty() {
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let key_len = key.len();
+        let val_len = value.len();
+        if key_len > u16::MAX as usize {
+            bail!("key len {} too large", key_len);
+        }
+        if val_len > u16::MAX as usize {
+            bail!("val len {} too large", val_len);
+        }
+        if key_len == 0 {
             panic!("empty key put")
         }
-        self.approximate_size
-            .fetch_add(_key.len() + _value.len(), Relaxed);
+        self.approximate_size.fetch_add(key_len + val_len, Relaxed);
         self.map
-            .insert(Bytes::copy_from_slice(_key), Bytes::copy_from_slice(_value));
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        if let Some(wal) = &self.wal {
+            wal.put(key, value)?
+        }
         Ok(())
     }
 
@@ -104,10 +127,10 @@ impl MemTable {
     }
 
     /// Get an iterator over a range of keys.
-    pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> MemTableIterator {
         let mut iter = MemTableIteratorBuilder {
             map: self.map.clone(),
-            iter_builder: |map| map.range((map_bound(_lower), map_bound(_upper))),
+            iter_builder: |map| map.range((map_bound(lower), map_bound(upper))),
             item: (MemTableIterator::EMPTY_ENTRY),
         }
         .build();
@@ -116,9 +139,9 @@ impl MemTable {
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
-    pub fn flush(&self, _builder: &mut SsTableBuilder) -> Result<()> {
+    pub fn flush(&self, builder: &mut SsTableBuilder) -> Result<()> {
         self.map.iter().for_each(|e| {
-            _builder.add(
+            builder.add(
                 KeySlice::from_slice(e.key().as_bytes()),
                 e.value().as_bytes(),
             )
