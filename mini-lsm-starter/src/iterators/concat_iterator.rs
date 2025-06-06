@@ -36,7 +36,7 @@ impl SstConcatIterator {
     }
 
     pub fn create_and_seek_to_key(sstables: Vec<Arc<SsTable>>, key: KeySlice) -> Result<Self> {
-        if sstables.is_empty() || key.raw_ref() > sstables.last().unwrap().last_key().raw_ref() {
+        if sstables.is_empty() || key > sstables.last().unwrap().last_key().as_key_slice() {
             return Ok(Self {
                 current: None,
                 next_sst_idx: 0,
@@ -44,7 +44,7 @@ impl SstConcatIterator {
             });
         }
 
-        let curr_idx = sstables.partition_point(|sst| key.raw_ref() > sst.last_key().raw_ref());
+        let curr_idx = sstables.partition_point(|sst| key > sst.last_key().as_key_slice());
 
         let current = Some(SsTableIterator::create_and_seek_to_key(
             sstables[curr_idx].clone(),

@@ -54,11 +54,11 @@ impl StorageIterator for LsmIterator {
     }
 
     fn key(&self) -> &[u8] {
-        self.inner.key().raw_ref()
+        self.inner.key().key_ref()
     }
 
     fn is_valid(&self) -> bool {
-        self.inner.is_valid() && key_in_end_bound(self.inner.key().raw_ref(), &self.end_bound)
+        self.inner.is_valid() && key_in_end_bound(self.inner.key().key_ref(), &self.end_bound)
     }
 
     fn next(&mut self) -> Result<()> {

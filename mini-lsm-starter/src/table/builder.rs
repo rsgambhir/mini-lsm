@@ -53,7 +53,7 @@ impl SsTableBuilder {
         }
         self.last_key = key.to_key_vec();
         self.key_fingerprints
-            .push(farmhash::fingerprint32(key.raw_ref()));
+            .push(farmhash::fingerprint32(key.key_ref()));
     }
 
     fn split_new_block(&mut self) {

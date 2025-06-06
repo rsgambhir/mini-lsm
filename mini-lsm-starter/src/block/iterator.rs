@@ -23,9 +23,12 @@ type ValueRange = (usize, usize);
 impl Block {
     fn get_first_key(&self) -> KeyVec {
         let mut buf: &[u8] = &self.data[self.offsets[0] as usize..];
-        buf.get_u16_le();
+        buf.get_u16_le(); // overlap
         let key_len = buf.get_u16_le() as usize;
-        KeyVec::from_vec(buf[..key_len].to_vec())
+        let key = buf[..key_len].to_vec();
+        buf.advance(key_len);
+        let key_ts = buf.get_u64_le();
+        KeyVec::from_vec_with_ts(key, key_ts)
     }
 }
 
@@ -36,15 +39,20 @@ impl BlockIterator {
         let overlap = buf.get_u16_le() as usize;
         let key_len = buf.get_u16_le() as usize;
         let key_after_overlap: &[u8] = &buf[..key_len];
+        buf.advance(key_len);
+        let key_ts = buf.get_u64_le();
+
         let key_itr = self
             .first_key
             .as_key_slice()
-            .raw_ref()
+            .key_ref()
             .iter()
             .take(overlap)
             .chain(key_after_overlap.iter());
 
-        key_itr.cmp(given_key.raw_ref().iter())
+        key_itr
+            .cmp(given_key.key_ref().iter()) // ("a", _) < ("b", _)
+            .then(key_ts.cmp(&given_key.ts()).reverse()) // ("a", 5) < ("a", 1)
     }
 
     fn get_kv_at_idx(&self, i: usize) -> (KeyVec, ValueRange) {
@@ -53,20 +61,25 @@ impl BlockIterator {
         let overlap = buf.get_u16_le() as usize;
         let key_len = buf.get_u16_le() as usize;
         let key_after_overlap: &[u8] = &buf[..key_len];
+        buf.advance(key_len);
+        let key_ts = buf.get_u64_le();
+
         let key: Vec<u8> = self
             .first_key
-            .as_key_slice()
-            .raw_ref()
+            .key_ref()
             .iter()
             .take(overlap)
             .chain(key_after_overlap.iter())
             .cloned()
             .collect();
 
-        let val_off = key_off + 4 + key_len;
+        let val_off = key_off + 2 + 2 + key_len + 8;
         let val_len = (&self.block.data[val_off..]).get_u16_le() as usize;
 
-        (KeyVec::from_vec(key), (val_off + 2, val_off + 2 + val_len))
+        (
+            KeyVec::from_vec_with_ts(key, key_ts),
+            (val_off + 2, val_off + 2 + val_len),
+        )
     }
 
     fn get_val(&self, vr: ValueRange) -> &[u8] {

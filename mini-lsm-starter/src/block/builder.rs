@@ -29,27 +29,27 @@ impl BlockBuilder {
     /// Adds a key-value pair to the block. Returns false when the block is full.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
-        if key.len() > u16::MAX as usize {
+        if key.key_len() > u16::MAX as usize {
             panic!("key size too large")
         }
         if value.len() > u16::MAX as usize {
             panic!("value size too large")
         }
         // todo(ramneek): should we move num elements to the front?
-        let new_size = /* KV data */ self.data.len() + 2 + key.len() + 2 + value.len() +
+        let new_size = /* KV data */ self.data.len() + 2 + key.raw_len() + 2 + value.len() +
             /* offsets */ 2 * (self.offsets.len() + 1) + /* num elements */2;
-        if !self.offsets.is_empty() && new_size > self.target_block_size {
+        if new_size > self.target_block_size && !self.offsets.is_empty() {
             return false;
         }
         // note: overflow checks at the start
         let overlap = key
-            .raw_ref()
+            .key_ref()
             .iter()
-            .zip(self.first_key.raw_ref().iter())
+            .zip(self.first_key.key_ref().iter())
             .take_while(|(x, y)| x == y)
             .count() as u16;
 
-        let key_len = key.len() as u16 - overlap;
+        let key_len = key.key_len() as u16 - overlap;
         let val_len = value.len() as u16;
 
         // note: overflow checked at the last add
@@ -58,7 +58,8 @@ impl BlockBuilder {
         self.data.extend_from_slice(&overlap.to_le_bytes());
         self.data.extend_from_slice(&key_len.to_le_bytes());
         self.data
-            .extend_from_slice(&key.into_inner()[overlap as usize..]);
+            .extend_from_slice(&key.key_ref()[overlap as usize..]);
+        self.data.extend_from_slice(&key.ts().to_le_bytes());
 
         self.data.extend_from_slice(&val_len.to_le_bytes());
         self.data.extend_from_slice(value);

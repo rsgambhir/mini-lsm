@@ -1,5 +1,5 @@
 use crate::iterators::StorageIterator;
-use crate::key::KeySlice;
+use crate::key::{KeySlice, TS_DEFAULT};
 use crate::table::SsTableBuilder;
 use crate::wal::Wal;
 use anyhow::{bail, Result};
@@ -142,7 +142,7 @@ impl MemTable {
     pub fn flush(&self, builder: &mut SsTableBuilder) -> Result<()> {
         self.map.iter().for_each(|e| {
             builder.add(
-                KeySlice::from_slice(e.key().as_bytes()),
+                KeySlice::from_slice(e.key().as_bytes(), TS_DEFAULT),
                 e.value().as_bytes(),
             )
         });
@@ -194,7 +194,7 @@ impl StorageIterator for MemTableIterator {
     }
 
     fn key(&self) -> KeySlice {
-        KeySlice::from_slice(self.borrow_item().0.as_bytes())
+        KeySlice::from_slice(self.borrow_item().0.as_bytes(), TS_DEFAULT)
     }
 
     fn is_valid(&self) -> bool {

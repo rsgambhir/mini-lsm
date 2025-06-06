@@ -38,10 +38,14 @@ impl BlockMeta {
     ) {
         for bm in block_meta.iter() {
             buf.put_u32_le(bm.offset as u32);
-            buf.put_u16_le(bm.first_key.len() as u16);
-            buf.put_slice(bm.first_key.raw_ref());
-            buf.put_u16_le(bm.last_key.len() as u16);
-            buf.put_slice(bm.last_key.raw_ref());
+
+            buf.put_u16_le(bm.first_key.key_len() as u16);
+            buf.put_slice(bm.first_key.key_ref());
+            buf.put_u64_le(bm.first_key.ts());
+
+            buf.put_u16_le(bm.last_key.key_len() as u16);
+            buf.put_slice(bm.last_key.key_ref());
+            buf.put_u64_le(bm.last_key.ts());
         }
     }
 
@@ -51,10 +55,20 @@ impl BlockMeta {
         // todo add num blocks in the encoding?
         while buf.has_remaining() {
             let offset = buf.get_u32_le() as usize;
-            let key_size = buf.get_u16_le() as usize;
-            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(key_size));
-            let key_size = buf.get_u16_le() as usize;
-            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(key_size));
+
+            let first_key = {
+                let key_len = buf.get_u16_le() as usize;
+                let key = buf.copy_to_bytes(key_len);
+                let key_ts = buf.get_u64_le();
+                KeyBytes::from_bytes_with_ts(key, key_ts)
+            };
+
+            let last_key = {
+                let key_len = buf.get_u16_le() as usize;
+                let key = buf.copy_to_bytes(key_len);
+                let key_ts = buf.get_u64_le();
+                KeyBytes::from_bytes_with_ts(key, key_ts)
+            };
 
             block_meta.push(BlockMeta {
                 offset,

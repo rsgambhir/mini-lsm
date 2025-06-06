@@ -16,7 +16,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::key::KeySlice;
+use crate::key::{KeySlice, TS_RANGE_BEGIN};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::MemTable;
@@ -451,12 +451,14 @@ impl LsmStorageInner {
             .l0_sstables
             .iter()
             .map(|id| state.sstables.get(id).unwrap().clone())
-            .filter(|sst| sst.first_key().raw_ref() <= key && key <= sst.last_key().raw_ref())
+            .filter(|sst| sst.first_key().key_ref() <= key && key <= sst.last_key().key_ref())
             .filter(|sst| sst.bloom.as_ref().is_none_or(|b| b.may_contain(key_fp)))
         {
-            let itr: SsTableIterator =
-                SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(key))?;
-            if itr.is_valid() && itr.key().raw_ref() == key {
+            let itr: SsTableIterator = SsTableIterator::create_and_seek_to_key(
+                sst,
+                KeySlice::from_slice(key, TS_RANGE_BEGIN),
+            )?;
+            if itr.is_valid() && itr.key().key_ref() == key {
                 let val = itr.value();
                 return if val.is_empty() {
                     Ok(None)
@@ -471,14 +473,14 @@ impl LsmStorageInner {
             if let Some(sst) = level_ssts
                 .iter()
                 .map(|id| state.sstables.get(id).unwrap().clone())
-                .find(|sst| sst.first_key().raw_ref() <= key && key <= sst.last_key().raw_ref())
+                .find(|sst| sst.first_key().key_ref() <= key && key <= sst.last_key().key_ref())
                 .filter(|sst| sst.bloom.as_ref().is_none_or(|b| b.may_contain(key_fp)))
             {
                 let itr = SsTableIterator::<false>::create_and_seek_to_key(
                     sst,
-                    KeySlice::from_slice(key),
+                    KeySlice::from_slice(key, TS_RANGE_BEGIN),
                 )?;
-                if itr.is_valid() && itr.key().raw_ref() == key {
+                if itr.is_valid() && itr.key().key_ref() == key {
                     let val = itr.value();
                     return if val.is_empty() {
                         Ok(None)
@@ -682,15 +684,16 @@ impl LsmStorageInner {
                 }
                 level_itrs.push(Box::new(match lower {
                     Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(ssts)?,
-                    Bound::Included(key) => {
-                        SstConcatIterator::create_and_seek_to_key(ssts, KeySlice::from_slice(key))?
-                    }
+                    Bound::Included(key) => SstConcatIterator::create_and_seek_to_key(
+                        ssts,
+                        KeySlice::from_slice(key, TS_RANGE_BEGIN),
+                    )?,
                     Bound::Excluded(key) => {
                         let mut itr = SstConcatIterator::create_and_seek_to_key(
                             ssts,
-                            KeySlice::from_slice(key),
+                            KeySlice::from_slice(key, TS_RANGE_BEGIN),
                         )?;
-                        if itr.is_valid() && itr.key().raw_ref() == key {
+                        if itr.is_valid() && itr.key().key_ref() == key {
                             itr.next()?;
                         }
                         itr
@@ -714,15 +717,15 @@ enum SeekPos<'a> {
 fn sst_overlaps_range(sst: &Arc<SsTable>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
     // intersection with Lower Bound -> inf
     match lower {
-        Bound::Included(skey) if skey > sst.last_key().raw_ref() => return false,
-        Bound::Excluded(skey) if skey >= sst.last_key().raw_ref() => return false,
+        Bound::Included(skey) if skey > sst.last_key().key_ref() => return false,
+        Bound::Excluded(skey) if skey >= sst.last_key().key_ref() => return false,
         _ => {}
     }
 
     // intersection with -inf -> upper bound
     match upper {
-        Bound::Included(ekey) if ekey < sst.first_key().raw_ref() => return false,
-        Bound::Excluded(ekey) if ekey <= sst.first_key().raw_ref() => return false,
+        Bound::Included(ekey) if ekey < sst.first_key().key_ref() => return false,
+        Bound::Excluded(ekey) if ekey <= sst.first_key().key_ref() => return false,
         _ => {}
     }
 
@@ -732,14 +735,17 @@ fn sst_overlaps_range(sst: &Arc<SsTable>, lower: Bound<&[u8]>, upper: Bound<&[u8
 fn sst_seek_to_start(sst: Arc<SsTable>, start: Bound<&[u8]>) -> Result<SsTableIterator> {
     match start {
         Bound::Unbounded => SsTableIterator::create_and_seek_to_first(sst),
-        Bound::Included(skey) if skey == sst.first_key().raw_ref() => {
+        Bound::Included(skey) if skey == sst.first_key().key_ref() => {
             SsTableIterator::create_and_seek_to_first(sst)
         }
         Bound::Included(skey) => {
-            SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(skey))
+            SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(skey, TS_RANGE_BEGIN))
         }
         Bound::Excluded(skey) => {
-            let mut itr = SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(skey))?;
+            let mut itr = SsTableIterator::create_and_seek_to_key(
+                sst,
+                KeySlice::from_slice(skey, TS_RANGE_BEGIN),
+            )?;
             itr.next()?;
             Ok(itr)
         }
