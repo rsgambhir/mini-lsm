@@ -493,8 +493,19 @@ impl LsmStorageInner {
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        unimplemented!()
+    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        for record in batch {
+            match record {
+                WriteBatchRecord::Del(key) => self.put_inner(key.as_ref(), &[])?,
+                WriteBatchRecord::Put(key, value) => {
+                    let key = key.as_ref();
+                    let value = value.as_ref();
+                    assert!(!value.is_empty());
+                    self.put_inner(key.as_ref(), value.as_ref())?
+                }
+            }
+        }
+        Ok(())
     }
 
     fn try_freeze(&self, size_hint: usize) -> Result<()> {
@@ -509,9 +520,10 @@ impl LsmStorageInner {
         Ok(())
     }
 
-    fn _put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
+    #[inline(always)]
+    fn put_inner(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let state = self.state.read();
-        let res = state.memtable.put(_key, _value);
+        let res = state.memtable.put(key, value);
         let sz = state.memtable.approximate_size();
         drop(state);
         self.try_freeze(sz).expect("failed to freeze");
@@ -519,13 +531,14 @@ impl LsmStorageInner {
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        self._put(_key, _value)
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        assert!(!value.is_empty());
+        self.put_inner(key, value)
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        self._put(_key, &[])
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
+        self.put_inner(key, &[])
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
