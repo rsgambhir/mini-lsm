@@ -56,6 +56,10 @@ impl SsTableBuilder {
             .push(farmhash::fingerprint32(key.key_ref()));
     }
 
+    pub fn last_added_key(&self) -> &[u8] {
+        self.last_key.key_ref()
+    }
+
     fn split_new_block(&mut self) {
         if self.first_key.is_empty() {
             return;

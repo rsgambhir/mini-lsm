@@ -16,10 +16,10 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::key::{KeySlice, TS_RANGE_BEGIN};
+use crate::key::{KeySlice, TS_RANGE_BEGIN, TS_RANGE_END};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
-use crate::mem_table::MemTable;
+use crate::mem_table::{map_key_ref_ts_bound, MemTable};
 use crate::mvcc::LsmMvccInner;
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::Result;
@@ -414,7 +414,7 @@ impl LsmStorageInner {
             compaction_controller,
             manifest: Some(manifest),
             options: options.into(),
-            mvcc: None,
+            mvcc: Some(LsmMvccInner::new(0)),
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
         };
 
@@ -432,82 +432,77 @@ impl LsmStorageInner {
         compaction_filters.push(compaction_filter);
     }
 
-    /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+    fn get_as_of_ts(&self, key: &[u8], ts: u64) -> Result<Option<Bytes>> {
         let state = { self.state.read().clone() };
 
-        match std::iter::once(&state.memtable)
-            .chain(state.imm_memtables.iter())
-            .find_map(|t| t.get(key))
-        {
-            Some(v) if !v.is_empty() => return Ok(Some(v)),
-            Some(v) if v.is_empty() => return Ok(None),
-            _ => {}
-        }
+        let key_begin = key_begin(key);
+        let key_end = key_end(key);
+
+        let mem_tables_itr = MergeIterator::create(
+            std::iter::once(&state.memtable)
+                .chain(state.imm_memtables.iter())
+                .map(|mt: &Arc<MemTable>| Box::new(mt.clone().scan(key_begin, key_end)))
+                .collect(),
+        );
 
         let key_fp = farmhash::fingerprint32(key);
 
-        for sst in state
-            .l0_sstables
-            .iter()
-            .map(|id| state.sstables.get(id).unwrap().clone())
-            .filter(|sst| sst.first_key().key_ref() <= key && key <= sst.last_key().key_ref())
-            .filter(|sst| sst.bloom.as_ref().is_none_or(|b| b.may_contain(key_fp)))
-        {
-            let itr: SsTableIterator = SsTableIterator::create_and_seek_to_key(
-                sst,
-                KeySlice::from_slice(key, TS_RANGE_BEGIN),
-            )?;
-            if itr.is_valid() && itr.key().key_ref() == key {
-                let val = itr.value();
-                return if val.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(Bytes::copy_from_slice(val)))
-                };
-            }
-        }
-
-        for (_, level_ssts) in &state.levels {
-            // todo(ramneek): use binary search to find the sstable in the level...
-            if let Some(sst) = level_ssts
+        let l0_itr = {
+            let mut l0_itrs = Vec::with_capacity(state.l0_sstables.len());
+            for sst in state
+                .l0_sstables
                 .iter()
                 .map(|id| state.sstables.get(id).unwrap().clone())
-                .find(|sst| sst.first_key().key_ref() <= key && key <= sst.last_key().key_ref())
-                .filter(|sst| sst.bloom.as_ref().is_none_or(|b| b.may_contain(key_fp)))
+                .filter(|sst| sst_can_contain_key(sst, key, key_fp))
             {
-                let itr = SsTableIterator::<false>::create_and_seek_to_key(
+                let itr: SsTableIterator = SsTableIterator::create_and_seek_to_key(
                     sst,
                     KeySlice::from_slice(key, TS_RANGE_BEGIN),
                 )?;
-                if itr.is_valid() && itr.key().key_ref() == key {
-                    let val = itr.value();
-                    return if val.is_empty() {
-                        Ok(None)
-                    } else {
-                        Ok(Some(Bytes::copy_from_slice(val)))
-                    };
-                }
+                l0_itrs.push(Box::new(itr));
             }
-        }
+            MergeIterator::create(l0_itrs)
+        };
 
+        let levels_itr = {
+            let mut level_itrs = Vec::with_capacity(state.levels.len());
+            for (_, level_ssts) in &state.levels {
+                // todo(ramneek): use binary search to find the sstable in the level...
+                let ssts: Vec<Arc<SsTable>> = level_ssts
+                    .iter()
+                    .map(|id| state.sstables.get(id).unwrap().clone())
+                    .filter(|sst| sst_can_contain_key(sst, key, key_fp))
+                    .collect();
+                if ssts.is_empty() {
+                    continue;
+                }
+                let itr = SstConcatIterator::create_and_seek_to_key(
+                    ssts,
+                    KeySlice::from_slice(key, TS_RANGE_BEGIN),
+                )?;
+                level_itrs.push(Box::new(itr));
+            }
+            MergeIterator::create(level_itrs)
+        };
+
+        let itr = TwoMergeIterator::create(mem_tables_itr, l0_itr)?;
+        let itr = TwoMergeIterator::create(itr, levels_itr)?;
+        let itr = LsmIterator::new(itr, Bound::Unbounded, ts).map(FusedIterator::new)?;
+
+        if itr.is_valid() && itr.key() == key {
+            let val = itr.value();
+            return if val.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(Bytes::copy_from_slice(val)))
+            };
+        }
         Ok(None)
     }
 
-    /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        for record in batch {
-            match record {
-                WriteBatchRecord::Del(key) => self.put_inner(key.as_ref(), &[])?,
-                WriteBatchRecord::Put(key, value) => {
-                    let key = key.as_ref();
-                    let value = value.as_ref();
-                    assert!(!value.is_empty());
-                    self.put_inner(key.as_ref(), value.as_ref())?
-                }
-            }
-        }
-        Ok(())
+    /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
+    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        self.get_as_of_ts(key, TS_RANGE_BEGIN)
     }
 
     fn try_freeze(&self, size_hint: usize) -> Result<()> {
@@ -523,7 +518,7 @@ impl LsmStorageInner {
     }
 
     #[inline(always)]
-    fn put_inner(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    fn put_inner(&self, key: KeySlice, value: &[u8]) -> Result<()> {
         let state = self.state.read();
         let res = state.memtable.put(key, value);
         let sz = state.memtable.approximate_size();
@@ -532,15 +527,39 @@ impl LsmStorageInner {
         res
     }
 
+    /// Write a batch of data into the storage.
+    #[inline(always)]
+    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        let _write_lock = self.mvcc.as_ref().unwrap().write_lock.lock();
+        let ts = self.mvcc.as_ref().unwrap().latest_commit_ts() + 1;
+
+        for record in batch {
+            match record {
+                WriteBatchRecord::Del(key) => {
+                    self.put_inner(KeySlice::from_slice(key.as_ref(), ts), &[])?
+                }
+                WriteBatchRecord::Put(key, value) => {
+                    let key = KeySlice::from_slice(key.as_ref(), ts);
+                    let value = value.as_ref();
+                    assert!(!value.is_empty());
+                    self.put_inner(key, value)?
+                }
+            }
+        }
+
+        self.mvcc.as_ref().unwrap().update_commit_ts(ts);
+        Ok(())
+    }
+
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         assert!(!value.is_empty());
-        self.put_inner(key, value)
+        self.write_batch(&[WriteBatchRecord::Put(key, value)])
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        self.put_inner(key, &[])
+        self.write_batch(&[WriteBatchRecord::Del(key)])
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -572,7 +591,7 @@ impl LsmStorageInner {
             self.sync_dir()?;
             // First create and persist wal so the manifest doesn't have a dangling ref.
             // Next, record the memtable's wal in the manifest before exposing the memtable
-            // to ensure we don't loose the writes synced to the memtable's wal.
+            // to ensure we don't lose the writes synced to the memtable's wal.
             self.manifest
                 .as_ref()
                 .unwrap()
@@ -642,17 +661,23 @@ impl LsmStorageInner {
     }
 
     /// Create an iterator over a range of keys.
-    pub fn scan(
+    fn scan_as_of(
         &self,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
+        ts: u64,
     ) -> Result<FusedIterator<LsmIterator>> {
         let state = { self.state.read().clone() };
 
         let mem_tables_itr = MergeIterator::create(
             std::iter::once(&state.memtable)
                 .chain(state.imm_memtables.iter())
-                .map(|mt: &Arc<MemTable>| Box::new(mt.clone().scan(lower, upper)))
+                .map(|mt: &Arc<MemTable>| {
+                    Box::new(mt.clone().scan(
+                        map_key_ref_ts_bound(lower, TS_RANGE_BEGIN),
+                        map_key_ref_ts_bound(upper, TS_RANGE_END),
+                    ))
+                })
                 .collect(),
         );
 
@@ -705,15 +730,30 @@ impl LsmStorageInner {
 
         let itr = TwoMergeIterator::create(mem_tables_itr, l0_itr)?;
         let itr = TwoMergeIterator::create(itr, levels_itr)?;
-        LsmIterator::new(itr, upper).map(FusedIterator::new)
+        LsmIterator::new(itr, upper, ts).map(FusedIterator::new)
+    }
+    pub fn scan(
+        &self,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+    ) -> Result<FusedIterator<LsmIterator>> {
+        self.scan_as_of(lower, upper, TS_RANGE_BEGIN)
     }
 }
 
-enum SeekPos<'a> {
-    Start,
-    Key(KeySlice<'a>, bool),
-    None,
+fn key_begin(key: &[u8]) -> Bound<KeySlice> {
+    Bound::Included(KeySlice::from_slice(key, TS_RANGE_BEGIN))
 }
+
+fn key_end(key: &[u8]) -> Bound<KeySlice> {
+    Bound::Included(KeySlice::from_slice(key, TS_RANGE_END))
+}
+
+fn sst_can_contain_key(sst: &Arc<SsTable>, key: &[u8], key_fp: u32) -> bool {
+    (sst.first_key().key_ref() <= key && key <= sst.last_key().key_ref())
+        && (sst.bloom.as_ref().is_none_or(|b| b.may_contain(key_fp)))
+}
+
 fn sst_overlaps_range(sst: &Arc<SsTable>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
     // intersection with Lower Bound -> inf
     match lower {

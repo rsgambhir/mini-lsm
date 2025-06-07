@@ -3,6 +3,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::key::{KeyBytes, KeySlice};
 use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
@@ -25,19 +26,23 @@ impl Wal {
         })
     }
 
-    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<KeyBytes, Bytes>) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).append(true).open(path)?;
         // todo(ramneek): this can be large, use buffered reader over the file
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
         let mut buf = buf.as_slice();
         while buf.has_remaining() {
-            let key_len = buf.get_u16_le() as usize;
-            let key = Bytes::copy_from_slice(&buf[..key_len]);
-            buf.advance(key_len);
-            let val_len = buf.get_u16_le() as usize;
-            let val = Bytes::copy_from_slice(&buf[..val_len]);
-            buf.advance(val_len);
+            let key = {
+                let key_len = buf.get_u16_le() as usize;
+                let key = buf.copy_to_bytes(key_len);
+                let key_ts = buf.get_u64_le();
+                KeyBytes::from_bytes_with_ts(key, key_ts)
+            };
+            let val = {
+                let val_len = buf.get_u16_le() as usize;
+                buf.copy_to_bytes(val_len)
+            };
             skiplist.insert(key, val);
         }
         Ok(Self {
@@ -45,13 +50,15 @@ impl Wal {
         })
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let key_len = key.len().try_into()?;
+    pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
+        let key_len = key.key_len().try_into()?;
         let val_len = value.len().try_into()?;
-        let mut buf = Vec::with_capacity((2 + key_len + 2 + val_len) as usize);
+        let mut buf = Vec::with_capacity((2 + key_len + 8 + 2 + val_len) as usize);
         // todo: define a global source of truth for max key and value len
         buf.put_u16_le(key_len);
-        buf.put_slice(key);
+        buf.put_slice(key.key_ref());
+        buf.put_u64_le(key.ts());
+
         buf.put_u16_le(val_len);
         buf.put_slice(value);
 

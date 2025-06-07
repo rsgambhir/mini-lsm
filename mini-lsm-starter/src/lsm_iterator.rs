@@ -19,6 +19,8 @@ type LsmIteratorInner = TwoMergeIterator<
 pub struct LsmIterator {
     inner: LsmIteratorInner,
     end_bound: Bound<Bytes>,
+    curr_key_ref: Vec<u8>,
+    as_of_ts: u64,
 }
 
 fn key_in_end_bound(key: &[u8], end_bound: &Bound<Bytes>) -> bool {
@@ -30,18 +32,49 @@ fn key_in_end_bound(key: &[u8], end_bound: &Bound<Bytes>) -> bool {
 }
 
 impl LsmIterator {
-    pub(crate) fn new(mut iter: LsmIteratorInner, end_bound: Bound<&[u8]>) -> Result<Self> {
-        Self::remove_front_del_markers(&mut iter)?;
-        Ok(Self {
+    pub(crate) fn new(
+        iter: LsmIteratorInner,
+        end_bound: Bound<&[u8]>,
+        as_of_ts: u64,
+    ) -> Result<Self> {
+        let mut itr = Self {
             inner: iter,
             end_bound: map_bound(end_bound),
-        })
+            curr_key_ref: Vec::new(),
+            as_of_ts,
+        };
+        itr.move_to_next_key()?;
+        Ok(itr)
     }
 
-    fn remove_front_del_markers(itr: &mut LsmIteratorInner) -> Result<()> {
-        while itr.is_valid() && itr.value().is_empty() {
-            itr.next()?;
-        }
+    fn move_to_next_key(&mut self) -> Result<()> {
+        let mut curr_key = std::mem::take(&mut self.curr_key_ref);
+        self.curr_key_ref = loop {
+            // go to the next key
+            while self.inner.is_valid() && self.inner.key().key_ref() == curr_key {
+                self.inner.next()?
+            }
+            // go to the given time
+            while self.inner.is_valid() && self.inner.key().ts() > self.as_of_ts {
+                self.inner.next()?
+            }
+
+            curr_key.clear();
+            if !self.inner.is_valid() {
+                break Vec::default();
+            }
+            let next_key = self.inner.key();
+            if !key_in_end_bound(next_key.key_ref(), &self.end_bound) {
+                break curr_key;
+            }
+            curr_key.extend_from_slice(next_key.key_ref());
+            if self.inner.value().is_empty() {
+                // delete marker, try next
+                self.inner.next()?;
+            } else {
+                break curr_key;
+            }
+        };
         Ok(())
     }
 }
@@ -54,16 +87,16 @@ impl StorageIterator for LsmIterator {
     }
 
     fn key(&self) -> &[u8] {
-        self.inner.key().key_ref()
+        self.curr_key_ref.as_slice()
     }
 
     fn is_valid(&self) -> bool {
-        self.inner.is_valid() && key_in_end_bound(self.inner.key().key_ref(), &self.end_bound)
+        !self.curr_key_ref.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
         self.inner.next()?;
-        Self::remove_front_del_markers(&mut self.inner)
+        self.move_to_next_key()
     }
 
     fn num_active_iterators(&self) -> usize {

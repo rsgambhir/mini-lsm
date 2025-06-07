@@ -150,14 +150,20 @@ impl LsmStorageInner {
             let key = itr.key();
             let val = itr.value();
 
-            if !val.is_empty() {
-                // skip tombstone markers
-                builder.add(key, val);
-            }
+            // if !val.is_empty() {
+            // todo: expire skip tombstone markers
+            builder.add(key, val);
+            // }
             itr.next()?;
-            if (!itr.is_valid() && !builder.is_empty()) || // reached end
-                builder.estimated_size() > self.options.target_sst_size
-            {
+            let should_end_sst = {
+                if itr.is_valid() {
+                    builder.estimated_size() > self.options.target_sst_size
+                        && itr.key().key_ref() != builder.last_added_key() // don't end if on the same key
+                } else {
+                    !builder.is_empty() // reached end
+                }
+            };
+            if should_end_sst {
                 let b =
                     std::mem::replace(&mut builder, SsTableBuilder::new(self.options.block_size));
                 let id = self.next_sst_id();
