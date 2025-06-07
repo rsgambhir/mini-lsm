@@ -150,6 +150,9 @@ impl SsTable {
         let bf = Bloom::decode(file.read(bf_off, bf_size)?.as_slice())?;
         curr_end -= bf_size;
 
+        let max_ts = file.read(curr_end - 8, 8)?.as_slice().get_u64_le();
+        curr_end -= 8;
+
         let meta_off = (&mut file.read(curr_end - 4, 4)?.as_slice()).get_u32_le() as u64;
         curr_end -= 4;
         let meta_size = curr_end - meta_off;
@@ -165,7 +168,7 @@ impl SsTable {
             last_key: block_meta.last().unwrap().last_key.clone(),
             block_meta,
             bloom: Some(bf),
-            max_ts: 0,
+            max_ts,
         })
     }
 

@@ -20,6 +20,7 @@ use crate::key::{KeySlice, TS_RANGE_BEGIN, TS_RANGE_END};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{map_key_ref_ts_bound, MemTable};
+use crate::mvcc::txn::{Transaction, TxnIterator};
 use crate::mvcc::LsmMvccInner;
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::Result;
@@ -225,7 +226,7 @@ impl MiniLsm {
         }))
     }
 
-    pub fn new_txn(&self) -> Result<()> {
+    pub fn new_txn(&self) -> Result<Arc<Transaction>> {
         self.inner.new_txn()
     }
 
@@ -253,11 +254,7 @@ impl MiniLsm {
         self.inner.sync()
     }
 
-    pub fn scan(
-        &self,
-        lower: Bound<&[u8]>,
-        upper: Bound<&[u8]>,
-    ) -> Result<FusedIterator<LsmIterator>> {
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
         self.inner.scan(lower, upper)
     }
 
@@ -405,6 +402,19 @@ impl LsmStorageInner {
 
         let next_sst_id = AtomicUsize::new(state.memtable.id() + 1);
 
+        let initial_ts = std::iter::once(&state.memtable)
+            .chain(state.imm_memtables.iter())
+            .map(|mt| mt.max_ts())
+            .chain(
+                state
+                    .get_all_sst_ids()
+                    .iter()
+                    .map(|id| state.sstables.get(id).unwrap().max_ts()),
+            )
+            .max()
+            .unwrap_or(0)
+            + 1;
+
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
@@ -414,7 +424,7 @@ impl LsmStorageInner {
             compaction_controller,
             manifest: Some(manifest),
             options: options.into(),
-            mvcc: Some(LsmMvccInner::new(0)),
+            mvcc: Some(LsmMvccInner::new(initial_ts)),
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
         };
 
@@ -432,7 +442,7 @@ impl LsmStorageInner {
         compaction_filters.push(compaction_filter);
     }
 
-    fn get_as_of_ts(&self, key: &[u8], ts: u64) -> Result<Option<Bytes>> {
+    pub(crate) fn get_as_of(&self, key: &[u8], ts: u64) -> Result<Option<Bytes>> {
         let state = { self.state.read().clone() };
 
         let key_begin = key_begin(key);
@@ -501,8 +511,9 @@ impl LsmStorageInner {
     }
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        self.get_as_of_ts(key, TS_RANGE_BEGIN)
+    pub fn get(self: &Arc<Self>, key: &[u8]) -> Result<Option<Bytes>> {
+        let txn = self.new_txn()?;
+        txn.get(key)
     }
 
     fn try_freeze(&self, size_hint: usize) -> Result<()> {
@@ -655,13 +666,16 @@ impl LsmStorageInner {
         Ok(())
     }
 
-    pub fn new_txn(&self) -> Result<()> {
-        // no-op
-        Ok(())
+    pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
+        Ok(self
+            .mvcc
+            .as_ref()
+            .unwrap()
+            .new_txn(self.clone(), self.options.serializable))
     }
 
     /// Create an iterator over a range of keys.
-    fn scan_as_of(
+    pub(crate) fn scan_as_of(
         &self,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
@@ -718,7 +732,7 @@ impl LsmStorageInner {
                             ssts,
                             KeySlice::from_slice(key, TS_RANGE_BEGIN),
                         )?;
-                        if itr.is_valid() && itr.key().key_ref() == key {
+                        while itr.is_valid() && itr.key().key_ref() == key {
                             itr.next()?;
                         }
                         itr
@@ -732,12 +746,10 @@ impl LsmStorageInner {
         let itr = TwoMergeIterator::create(itr, levels_itr)?;
         LsmIterator::new(itr, upper, ts).map(FusedIterator::new)
     }
-    pub fn scan(
-        &self,
-        lower: Bound<&[u8]>,
-        upper: Bound<&[u8]>,
-    ) -> Result<FusedIterator<LsmIterator>> {
-        self.scan_as_of(lower, upper, TS_RANGE_BEGIN)
+
+    pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
+        let txn = self.new_txn()?;
+        txn.scan(lower, upper)
     }
 }
 
@@ -786,7 +798,9 @@ fn sst_seek_to_start(sst: Arc<SsTable>, start: Bound<&[u8]>) -> Result<SsTableIt
                 sst,
                 KeySlice::from_slice(skey, TS_RANGE_BEGIN),
             )?;
-            itr.next()?;
+            while itr.is_valid() && itr.key().key_ref() == skey {
+                itr.next()?;
+            }
             Ok(itr)
         }
     }

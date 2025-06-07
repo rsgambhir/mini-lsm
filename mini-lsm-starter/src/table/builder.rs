@@ -15,6 +15,7 @@ pub struct SsTableBuilder {
     builder: BlockBuilder,
     first_key: KeyVec,
     last_key: KeyVec,
+    max_ts: u64,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
@@ -32,6 +33,7 @@ impl SsTableBuilder {
             meta: vec![],
             block_size,
             key_fingerprints: vec![],
+            max_ts: 0,
         }
     }
 
@@ -52,6 +54,7 @@ impl SsTableBuilder {
             self.first_key = key.to_key_vec();
         }
         self.last_key = key.to_key_vec();
+        self.max_ts = self.max_ts.max(key.ts());
         self.key_fingerprints
             .push(farmhash::fingerprint32(key.key_ref()));
     }
@@ -105,6 +108,7 @@ impl SsTableBuilder {
         }
         BlockMeta::encode_block_meta(self.meta.as_slice(), &mut self.data);
         self.data.put_u32_le(meta_off as u32);
+        self.data.put_u64_le(self.max_ts);
 
         let bf = Bloom::build_from_key_hashes(
             self.key_fingerprints.as_slice(),
@@ -126,7 +130,7 @@ impl SsTableBuilder {
             last_key: self.meta.last().unwrap().last_key.clone(),
             block_meta: self.meta,
             bloom: Some(bf),
-            max_ts: 0,
+            max_ts: self.max_ts,
         })
     }
 
