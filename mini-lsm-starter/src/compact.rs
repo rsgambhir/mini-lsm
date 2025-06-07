@@ -116,7 +116,7 @@ impl LsmStorageInner {
     fn get_concat_itr(
         ssts: &HashMap<usize, Arc<SsTable>>,
         level_sst_ids: &[usize],
-    ) -> Result<SstConcatIterator> {
+    ) -> Result<SstConcatIterator<true>> {
         SstConcatIterator::create_and_seek_to_first(
             level_sst_ids
                 .iter()
@@ -155,6 +155,7 @@ impl LsmStorageInner {
             builder.add(key, val);
             // }
             itr.next()?;
+
             let should_end_sst = {
                 if itr.is_valid() {
                     builder.estimated_size() > self.options.target_sst_size

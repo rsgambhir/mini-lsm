@@ -9,13 +9,13 @@ use anyhow::Result;
 
 /// Concat multiple iterators ordered in key order and their key ranges do not overlap. We do not want to create the
 /// iterators when initializing this iterator to reduce the overhead of seeking.
-pub struct SstConcatIterator {
-    current: Option<SsTableIterator<true>>,
+pub struct SstConcatIterator<const BYPASS_CACHE: bool = false> {
+    current: Option<SsTableIterator<BYPASS_CACHE>>,
     next_sst_idx: usize,
     sstables: Vec<Arc<SsTable>>,
 }
 
-impl SstConcatIterator {
+impl<const BYPASS_CACHE: bool> SstConcatIterator<BYPASS_CACHE> {
     pub fn create_and_seek_to_first(sstables: Vec<Arc<SsTable>>) -> Result<Self> {
         if sstables.is_empty() {
             return Ok(Self {
@@ -24,7 +24,7 @@ impl SstConcatIterator {
                 sstables,
             });
         }
-        let current = Some(SsTableIterator::create_and_seek_to_first(
+        let current = Some(SsTableIterator::<BYPASS_CACHE>::create_and_seek_to_first(
             sstables[0].clone(),
         )?);
 
@@ -46,7 +46,7 @@ impl SstConcatIterator {
 
         let curr_idx = sstables.partition_point(|sst| key > sst.last_key().as_key_slice());
 
-        let current = Some(SsTableIterator::create_and_seek_to_key(
+        let current = Some(SsTableIterator::<BYPASS_CACHE>::create_and_seek_to_key(
             sstables[curr_idx].clone(),
             key,
         )?);
@@ -66,7 +66,7 @@ impl SstConcatIterator {
     }
 }
 
-impl StorageIterator for SstConcatIterator {
+impl<const BYPASS_CACHE: bool> StorageIterator for SstConcatIterator<BYPASS_CACHE> {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
@@ -87,7 +87,7 @@ impl StorageIterator for SstConcatIterator {
         if current.is_valid() {
             self.current.replace(current);
         } else if self.next_sst_idx < self.sstables.len() {
-            self.current = Some(SsTableIterator::<true>::create_and_seek_to_first(
+            self.current = Some(SsTableIterator::<BYPASS_CACHE>::create_and_seek_to_first(
                 self.sstables[self.next_sst_idx].clone(),
             )?);
             self.next_sst_idx += 1;

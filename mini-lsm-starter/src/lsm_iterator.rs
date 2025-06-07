@@ -11,9 +11,9 @@ use bytes::Bytes;
 use std::ops::Bound;
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
-type LsmIteratorInner = TwoMergeIterator<
-    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>,
-    MergeIterator<SstConcatIterator>,
+type LsmIteratorInner<const BYPASS_CACHE: bool = false> = TwoMergeIterator<
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator<BYPASS_CACHE>>>,
+    MergeIterator<SstConcatIterator<BYPASS_CACHE>>,
 >;
 
 pub struct LsmIterator {
