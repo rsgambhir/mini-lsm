@@ -138,28 +138,62 @@ impl LsmStorageInner {
         Ok(MergeIterator::create(l0_itrs))
     }
 
+    /// itr MUST contain all the versions of a key in the levels that are to be compacted.
     fn build_sorted_run<Itr: for<'a> StorageIterator<KeyType<'a> = Key<&'a [u8]>>>(
         &self,
         mut itr: Itr,
+        is_last_level: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
+        // todo(ramneek): remove dangling ssts here, or in a background thread.
+        let watermark = self.mvcc.as_ref().unwrap().watermark();
+
         let mut builder = SsTableBuilder::new(self.options.block_size);
         let mut level_ssts: Vec<Arc<SsTable>> = Vec::new();
 
-        // todo(ramneek): remove dangling ssts here, or in a background thread.
         while itr.is_valid() {
-            let key = itr.key();
-            let val = itr.value();
-
-            // if !val.is_empty() {
-            // todo: expire skip tombstone markers
-            builder.add(key, val);
-            // }
-            itr.next()?;
+            let key = itr.key().to_key_vec();
+            let mut latest_before_watermark_seen = false;
+            // Add all the relevant versions for this key
+            while itr.is_valid() {
+                let next_key = itr.key();
+                if next_key.key_ref() != key.key_ref() {
+                    break;
+                }
+                if latest_before_watermark_seen {
+                    // GC
+                } else {
+                    let val = itr.value();
+                    let ts = next_key.ts();
+                    latest_before_watermark_seen = ts <= watermark;
+                    if is_last_level && val.is_empty() && ts <= watermark {
+                        // GC the del marker in last level?
+                        // Invariants:
+                        //  1. The itr contains sstables from consecutive levels
+                        //  2. Itr will contain _all_ the versions of the key in the levels to be compacted
+                        //     - This is trivially true for the lower level.
+                        //     - For the upper level, either the full level is taken(L0),
+                        //       or if only one sst is taken for a non-L0, then it is guaranteed to
+                        //       contain all the versions of the key since we are not splitting the
+                        //       sst in compaction util we get a new key below.
+                        //  This means that we can safely GC the del marker(and everything before it)
+                        //  if it has ts <= watermark.
+                        //      Note: can also GC the del marker if there is no version before it.
+                        //            not doing it here for now for simplicity.
+                        //
+                        //  This would not be true if Itr doesn't contain all the versions of the key in the levels
+                        //  to be compacted. GCing the del marker will expose some other version that is not in the
+                        //  Itr but is in the levels.
+                        //
+                    } else {
+                        builder.add(next_key, val);
+                    }
+                }
+                itr.next()?
+            }
 
             let should_end_sst = {
                 if itr.is_valid() {
                     builder.estimated_size() > self.options.target_sst_size
-                        && itr.key().key_ref() != builder.last_added_key() // don't end if on the same key
                 } else {
                     !builder.is_empty() // reached end
                 }
@@ -188,20 +222,22 @@ impl LsmStorageInner {
                 let l1_itr = Self::get_concat_itr(&state.sstables, l1)?;
 
                 let itr = TwoMergeIterator::create(l0_itr, l1_itr)?;
-                self.build_sorted_run(itr)
+                self.build_sorted_run(itr, true)
             }
 
             CompactionTask::Simple(SimpleLeveledCompactionTask {
                 upper_level,
                 upper_level_sst_ids,
                 lower_level_sst_ids,
-                ..
+                lower_level: _,
+                is_lower_level_bottom_level,
             })
             | CompactionTask::Leveled(LeveledCompactionTask {
                 upper_level,
                 upper_level_sst_ids,
                 lower_level_sst_ids,
-                ..
+                lower_level: _,
+                is_lower_level_bottom_level,
             }) => {
                 let state = { self.state.read().clone() };
 
@@ -210,12 +246,12 @@ impl LsmStorageInner {
                     // concat iterator
                     let upper_itr = Self::get_concat_itr(&state.sstables, upper_level_sst_ids)?;
                     let itr = TwoMergeIterator::create(upper_itr, lower_itr)?;
-                    self.build_sorted_run(itr)
+                    self.build_sorted_run(itr, *is_lower_level_bottom_level)
                 } else {
                     // merge iterator
                     let upper_itr = Self::get_l0_itr(&state, upper_level_sst_ids)?;
                     let itr = TwoMergeIterator::create(upper_itr, lower_itr)?;
-                    self.build_sorted_run(itr)
+                    self.build_sorted_run(itr, *is_lower_level_bottom_level)
                 }
             }
 
@@ -230,7 +266,7 @@ impl LsmStorageInner {
                     )?));
                 }
                 let itr = MergeIterator::create(tiers_itrs);
-                self.build_sorted_run(itr)
+                self.build_sorted_run(itr, task.bottom_tier_included)
             }
         }
     }

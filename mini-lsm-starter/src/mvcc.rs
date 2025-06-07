@@ -2,7 +2,7 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 pub mod txn;
-mod watermark;
+pub mod watermark;
 
 use crate::lsm_storage::LsmStorageInner;
 use crossbeam_skiplist::SkipMap;
@@ -55,7 +55,12 @@ impl LsmMvccInner {
     }
 
     pub fn new_txn(&self, inner: Arc<LsmStorageInner>, serializable: bool) -> Arc<Transaction> {
-        let read_ts = { self.ts.lock().0 };
+        let read_ts = {
+            let mut ts = self.ts.lock();
+            let read_ts = ts.0;
+            ts.1.add_reader(read_ts);
+            read_ts
+        };
         Arc::new(Transaction {
             read_ts,
             inner,

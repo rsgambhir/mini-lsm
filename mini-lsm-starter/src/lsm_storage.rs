@@ -281,6 +281,10 @@ impl LsmStorageInner {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub(crate) fn mvcc(self: &Arc<Self>) -> &LsmMvccInner {
+        self.mvcc.as_ref().unwrap()
+    }
+
     fn clean_up_unreferenced_ssts(&self) -> Result<()> {
         // todo
         Ok(())
