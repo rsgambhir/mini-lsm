@@ -9,6 +9,7 @@ where
     collection.into_iter().collect()
 }
 
+#[allow(dead_code)]
 pub fn to_test_string(b: &[u8]) -> String {
     String::from_utf8(b.to_vec()).unwrap()
 }

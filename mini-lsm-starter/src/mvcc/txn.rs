@@ -1,7 +1,4 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
@@ -16,6 +13,7 @@ use std::{
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::lsm_storage::WriteBatchRecord;
 use crate::mem_table::map_bound;
+use crate::mvcc::CommittedTxnData;
 use crate::{
     iterators::StorageIterator,
     lsm_iterator::{FusedIterator, LsmIterator},
@@ -38,8 +36,22 @@ impl Transaction {
         }
     }
 
+    fn add_to_read_set(&self, key: &[u8]) {
+        if let Some(write_read_set) = &self.key_hashes {
+            let fp = farmhash::fingerprint32(key);
+            let write_read_set = write_read_set.lock().1.insert(fp);
+        }
+    }
+    fn add_to_write_set(&self, key: &[u8]) {
+        if let Some(write_read_set) = &self.key_hashes {
+            let fp = farmhash::fingerprint32(key);
+            let write_read_set = write_read_set.lock().0.insert(fp);
+        }
+    }
+
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.check_commited();
+        self.add_to_read_set(key);
         let val = self.local_storage.get(key).map(|e| e.value().clone());
         if let Some(val) = val {
             return if val.is_empty() {
@@ -67,12 +79,14 @@ impl Transaction {
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
         self.check_commited();
+        self.add_to_write_set(key);
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
     }
 
     pub fn delete(&self, key: &[u8]) {
         self.check_commited();
+        self.add_to_write_set(key);
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(&[]));
     }
@@ -85,6 +99,32 @@ impl Transaction {
         {
             panic!("commit after commit")
         }
+        let mvcc = self.inner.mvcc();
+
+        let _commit_lock = mvcc.commit_lock.lock();
+        let expected_commit_ts = mvcc.latest_commit_ts() + 1;
+
+        let serialize = self.inner.options.serializable;
+        if serialize {
+            let wr_set = self.key_hashes.as_ref().unwrap().lock();
+            let (write_set, read_set) = &*wr_set;
+            // Read only tx can always be serialized at the txn's read_ts.
+            if !write_set.is_empty() {
+                let committed_txns = self.inner.mvcc().committed_txns.lock();
+                for (_, txn_data) in committed_txns.range((self.read_ts + 1)..expected_commit_ts) {
+                    // We only need to check conflicts b/w our read set and commited(and possible conflicting)
+                    // txns write sets. Blind writes can always be serialized. If a write depended
+                    // on a something from the db, then the read set would capture it.
+                    // The already commited txn's couldn't have observed our writes because we haven't commited yet.
+                    if txn_data.key_hashes.intersection(read_set).next().is_some() {
+                        bail!("OCC: unable to serialize txn, please retry");
+                    }
+                }
+            }
+        }
+
+        // write the data to the storage engine, the storage engine will add records
+        // with version expected_commit_ts.
         let batch = self
             .local_storage
             .iter()
@@ -96,7 +136,35 @@ impl Transaction {
                 }
             })
             .collect::<Vec<WriteBatchRecord<_>>>();
-        self.inner.write_batch(&batch)?;
+
+        let commit_ts = self.inner.write_batch_inner(&batch)?;
+        assert_eq!(expected_commit_ts, commit_ts);
+
+        // before giving up the commit lock, add our txns write set
+        if serialize {
+            let mut committed_txns = self.inner.mvcc().committed_txns.lock();
+            let mut wr_set = self.key_hashes.as_ref().unwrap().lock();
+            let (write_set, _) = &mut *wr_set;
+
+            committed_txns.insert(
+                commit_ts,
+                CommittedTxnData {
+                    key_hashes: std::mem::take(write_set),
+                    read_ts: self.read_ts,
+                    commit_ts,
+                },
+            );
+            // cleanup
+            let watermark = self.inner.mvcc().watermark();
+            while let Some(entry) = committed_txns.first_entry() {
+                if *entry.key() < watermark {
+                    entry.remove();
+                } else {
+                    break;
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -173,6 +241,9 @@ impl TxnIterator {
     fn move_to_next_key(&mut self) -> Result<()> {
         while self.iter.is_valid() && self.iter.value().is_empty() {
             self.iter.next()?;
+        }
+        if self.iter.is_valid() {
+            self.txn.as_ref().add_to_read_set(self.iter.key())
         }
         Ok(())
     }

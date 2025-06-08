@@ -222,22 +222,20 @@ impl LsmStorageInner {
                 let l1_itr = Self::get_concat_itr(&state.sstables, l1)?;
 
                 let itr = TwoMergeIterator::create(l0_itr, l1_itr)?;
-                self.build_sorted_run(itr, true)
+                self.build_sorted_run(itr, task.compact_to_bottom_level())
             }
 
             CompactionTask::Simple(SimpleLeveledCompactionTask {
                 upper_level,
                 upper_level_sst_ids,
                 lower_level_sst_ids,
-                lower_level: _,
-                is_lower_level_bottom_level,
+                ..
             })
             | CompactionTask::Leveled(LeveledCompactionTask {
                 upper_level,
                 upper_level_sst_ids,
                 lower_level_sst_ids,
-                lower_level: _,
-                is_lower_level_bottom_level,
+                ..
             }) => {
                 let state = { self.state.read().clone() };
 
@@ -246,12 +244,12 @@ impl LsmStorageInner {
                     // concat iterator
                     let upper_itr = Self::get_concat_itr(&state.sstables, upper_level_sst_ids)?;
                     let itr = TwoMergeIterator::create(upper_itr, lower_itr)?;
-                    self.build_sorted_run(itr, *is_lower_level_bottom_level)
+                    self.build_sorted_run(itr, task.compact_to_bottom_level())
                 } else {
                     // merge iterator
                     let upper_itr = Self::get_l0_itr(&state, upper_level_sst_ids)?;
                     let itr = TwoMergeIterator::create(upper_itr, lower_itr)?;
-                    self.build_sorted_run(itr, *is_lower_level_bottom_level)
+                    self.build_sorted_run(itr, task.compact_to_bottom_level())
                 }
             }
 
