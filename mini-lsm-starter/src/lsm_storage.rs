@@ -533,13 +533,12 @@ impl LsmStorageInner {
     }
 
     #[inline(always)]
-    fn put_inner(&self, key: KeySlice, value: &[u8]) -> Result<()> {
+    fn put_batch_inner(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
         let state = self.state.read();
-        let res = state.memtable.put(key, value);
+        state.memtable.put_batch(data)?;
         let sz = state.memtable.approximate_size();
         drop(state);
-        self.try_freeze(sz).expect("failed to freeze");
-        res
+        self.try_freeze(sz)
     }
 
     /// Write a batch of data into the storage.
@@ -548,19 +547,22 @@ impl LsmStorageInner {
         let _write_lock = self.mvcc.as_ref().unwrap().write_lock.lock();
         let ts = self.mvcc.as_ref().unwrap().latest_commit_ts() + 1;
 
+        let mut data: Vec<(KeySlice, &[u8])> = Vec::with_capacity(batch.len());
+
         for record in batch {
             match record {
                 WriteBatchRecord::Del(key) => {
-                    self.put_inner(KeySlice::from_slice(key.as_ref(), ts), &[])?
+                    data.push((KeySlice::from_slice(key.as_ref(), ts), &[]));
                 }
                 WriteBatchRecord::Put(key, value) => {
                     let key = KeySlice::from_slice(key.as_ref(), ts);
                     let value = value.as_ref();
                     assert!(!value.is_empty());
-                    self.put_inner(key, value)?
+                    data.push((key, value));
                 }
             }
         }
+        self.put_batch_inner(data.as_slice())?;
 
         self.mvcc.as_ref().unwrap().update_commit_ts(ts);
         Ok(())

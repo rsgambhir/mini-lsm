@@ -123,32 +123,37 @@ impl MemTable {
     /// In week 2, day 6, also flush the data to WAL.
     /// In week 3, day 5, modify the function to use the batch API.
     pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
-        let key_len = key.key_len();
-        let val_len = value.len();
-        if key_len > u16::MAX as usize {
-            bail!("key len {} too large", key_len);
-        }
-        if val_len > u16::MAX as usize {
-            bail!("val len {} too large", val_len);
-        }
-        if key_len == 0 {
-            panic!("empty key put")
-        }
-        self.approximate_size
-            .fetch_add(key.raw_len() + val_len, Relaxed);
-        self.map.insert(
-            key.to_key_vec().into_key_bytes(),
-            Bytes::copy_from_slice(value),
-        );
-        if let Some(wal) = &self.wal {
-            wal.put(key, value)?
-        }
-        Ok(())
+        self.put_batch(&[(key, value)])
     }
 
     /// Implement this in week 3, day 5.
-    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
+    pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
+        let mut batch_size = 0;
+        for (key, value) in data {
+            let key_len = key.key_len();
+            let val_len = value.len();
+            if key_len > u16::MAX as usize {
+                bail!("key len {} too large", key_len);
+            }
+            if val_len > u16::MAX as usize {
+                bail!("val len {} too large", val_len);
+            }
+            if key_len == 0 {
+                panic!("empty key put")
+            }
+            self.map.insert(
+                key.to_key_vec().into_key_bytes(),
+                Bytes::copy_from_slice(value),
+            );
+            batch_size += key.raw_len() + value.len();
+        }
+
+        self.approximate_size.fetch_add(batch_size, Relaxed);
+
+        if let Some(wal) = &self.wal {
+            wal.put_batch(data)?
+        }
+        Ok(())
     }
 
     pub fn sync_wal(&self) -> Result<()> {
