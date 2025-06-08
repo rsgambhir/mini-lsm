@@ -1,5 +1,3 @@
-#![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
-
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::ops::Bound;

@@ -12,7 +12,7 @@ use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::Key;
-use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::lsm_storage::{CompactionFilter, LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::Result;
@@ -185,7 +185,23 @@ impl LsmStorageInner {
                         //  Itr but is in the levels.
                         //
                     } else {
-                        builder.add(next_key, val);
+                        let mut skip = false;
+                        if ts <= watermark {
+                            let compaction_filers = self.compaction_filters.lock();
+                            for filer in compaction_filers.iter() {
+                                match filer {
+                                    CompactionFilter::Prefix(prefix) => {
+                                        if key.key_ref().starts_with(prefix) {
+                                            skip = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !skip {
+                            builder.add(next_key, val);
+                        }
                     }
                 }
                 itr.next()?

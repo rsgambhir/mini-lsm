@@ -39,13 +39,13 @@ impl Transaction {
     fn add_to_read_set(&self, key: &[u8]) {
         if let Some(write_read_set) = &self.key_hashes {
             let fp = farmhash::fingerprint32(key);
-            let write_read_set = write_read_set.lock().1.insert(fp);
+            write_read_set.lock().1.insert(fp);
         }
     }
     fn add_to_write_set(&self, key: &[u8]) {
         if let Some(write_read_set) = &self.key_hashes {
             let fp = farmhash::fingerprint32(key);
-            let write_read_set = write_read_set.lock().0.insert(fp);
+            write_read_set.lock().0.insert(fp);
         }
     }
 
